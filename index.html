@@ -1344,57 +1344,170 @@
             };
         };
 
+        // ─── Guided menu tree (state-machine flow) ─────────────────────────────
+        //
+        // Hierarchical categorization of protocols.md content. Each leaf owns
+        // a set of slides via `slideRanges` ([lo, hi] inclusive) and/or a
+        // `match(section)` predicate. The UI drills root → category → leaf
+        // and renders every matching section in slide order. Free-text input
+        // bypasses the tree and jumps directly to smAnswer()'s best match,
+        // with an option to open that result's leaf in the menu.
+        const SM_MENU_TREE = {
+            id: 'root',
+            label: 'תפריט ראשי',
+            children: [
+                {
+                    id: 'incidents', label: '🚨 ניהול אירועים', children: [
+                        { id: 'inc_search',   label: 'אירוע איתור',            slideRanges: [[93, 111]] },
+                        { id: 'inc_rescue',   label: 'אירוע חילוץ',            slideRanges: [[112, 121]] },
+                        { id: 'inc_nepal',    label: 'חילוץ בנפאל',            slideRanges: [[122, 137]] },
+                        { id: 'inc_mental',   label: 'אירוע נפשי',             slideRanges: [[144, 156], [165, 177]] },
+                        { id: 'inc_medical',  label: 'אירוע רפואי / הטסה',    slideRanges: [[196, 197]], match: (s) => /הטסה\s*רפואית|רפואי|רופא|Medical\s*Assistance/i.test(s.title) },
+                        { id: 'inc_private',  label: 'אירוע פרטי',             slideRanges: [[192, 195]] },
+                        { id: 'inc_israel',   label: 'אירועים בארץ',            slideRanges: [[198, 201]] },
+                        { id: 'inc_security', label: 'אירועים ביטחוניים / טרור', slideRanges: [[202, 204]] },
+                        { id: 'inc_maz',      label: 'אר"ן – רב נפגעים',       slideRanges: [[205, 207]] },
+                    ],
+                },
+                {
+                    id: 'protocols', label: '📋 נהלים מבצעיים', children: [
+                        { id: 'proto_sop',      label: 'סדר פעולות ניהול אירועים', slideRanges: [[157, 162]] },
+                        { id: 'proto_handover', label: 'נוהל החלפת משמרת',        slideRanges: [[12, 23]] },
+                        { id: 'proto_assets',   label: 'נוהל הפעלת ASSETS',        match: (s) => /ASSET/i.test(s.title) },
+                        { id: 'proto_spl',      label: 'נוהל הפעלת SPL',           match: (s) => /SPL/i.test(s.title) || s.slide === 191 },
+                        { id: 'proto_rescued',  label: 'הוראות למחולצים',          slideRanges: [[163, 164]] },
+                        { id: 'proto_doctor',   label: 'הפעלת רופא',               match: (s) => /הפעלת\s*רופא/.test(s.title) },
+                    ],
+                },
+                {
+                    id: 'company', label: '🏢 על החברה', children: [
+                        { id: 'co_background', label: 'רקע והיסטוריה', slideRanges: [[3, 4]] },
+                        { id: 'co_structure',  label: 'מבנה החברה',   slideRanges: [[5, 7]] },
+                        { id: 'co_role',       label: 'הגדרת תפקיד',  slideRanges: [[10, 11]] },
+                    ],
+                },
+                {
+                    id: 'insurance', label: '💼 ביטוח ולקוחות', children: [
+                        { id: 'ins_clients', label: 'הלקוחות של מגנוס',    slideRanges: [[8, 9]] },
+                        { id: 'ins_israeli', label: 'חברות ביטוח ישראליות', slideRanges: [[179, 188]] },
+                        { id: 'ins_foreign', label: 'חברות ביטוח זרות',     slideRanges: [[219, 222]], match: (s) => /CIGNA|זרות/i.test(s.title) },
+                    ],
+                },
+                {
+                    id: 'business', label: '🌐 B2B ו-B2C', children: [
+                        { id: 'biz_b2b',       label: 'B2B – כללי',          slideRanges: [[208, 208], [223, 223], [245, 246]] },
+                        { id: 'biz_jdc',       label: 'JDC',                 slideRanges: [[209, 218], [242, 242]], match: (s) => /JDC|Joint\s*Distribution/i.test(s.title) },
+                        { id: 'biz_airliquid', label: 'Air Liquide',         slideRanges: [[225, 225]], match: (s) => /Air\s*Liquid|liquide/i.test(s.title) },
+                        { id: 'biz_ia',        label: 'Innovation Africa',   slideRanges: [[226, 226], [244, 244]], match: (s) => /INNOVATION\s*AFRICA|AEROWORX/i.test(s.title) },
+                        { id: 'biz_b2c',       label: 'B2C / Magnus Safety', slideRanges: [[227, 241], [243, 243], [249, 257], [259, 260]] },
+                        { id: 'biz_barsos',    label: 'BAR-SOS',             slideRanges: [[258, 258]], match: (s) => /BAR-?SOS/i.test(s.title) },
+                        { id: 'biz_mashm',     label: 'מש"מ / דרך לוטן',    slideRanges: [[247, 248]] },
+                    ],
+                },
+                {
+                    id: 'tools', label: '🛠️ כלים ותוכנות', children: [
+                        { id: 'tools_sf',      label: 'Salesforce',         slideRanges: [[48, 60]] },
+                        { id: 'tools_monday',  label: 'Monday',             slideRanges: [[30, 32]] },
+                        { id: 'tools_balcony', label: 'Balcony',            slideRanges: [[33, 47]] },
+                        { id: 'tools_explore', label: 'Explore / SAT Desk', slideRanges: [[61, 70]] },
+                        { id: 'tools_ecc',     label: 'ECC / התראות SOS',   slideRanges: [[71, 81]] },
+                        { id: 'tools_apps',    label: 'אפליקציות נוספות',   slideRanges: [[82, 84]] },
+                        { id: 'tools_email',   label: 'אימייל',             slideRanges: [[85, 89]] },
+                        { id: 'tools_intel',   label: 'מודיעין',            slideRanges: [[236, 236], [261, 266]], match: (s) => /מודיעין/.test(s.title) },
+                        { id: 'tools_methods', label: 'שיטות עבודה בדסק',   slideRanges: [[29, 29], [90, 92]] },
+                    ],
+                },
+                {
+                    id: 'routes', label: '🗺️ מסלולים ועונות טיול', children: [
+                        { id: 'routes_general', label: 'מסלולים ועונות – כללי', slideRanges: [[24, 28]] },
+                        { id: 'routes_nepal',   label: 'טרקים בנפאל',           slideRanges: [[138, 143]] },
+                    ],
+                },
+            ],
+        };
+
+        const smMatchLeaf = (leaf, section) => {
+            if (leaf.slideRanges) {
+                for (const [lo, hi] of leaf.slideRanges) {
+                    if (section.slide >= lo && section.slide <= hi) return true;
+                }
+            }
+            return leaf.match ? !!leaf.match(section) : false;
+        };
+
+        // Find the leaf that owns a given section — used when a free-text search
+        // result should surface a "open in menu" shortcut.
+        const smResolveLeaf = (root, section) => {
+            const walk = (node, path) => {
+                if (!node.children) {
+                    return smMatchLeaf(node, section) ? { path, leaf: node } : null;
+                }
+                for (const c of node.children) {
+                    const r = walk(c, [...path, c]);
+                    if (r) return r;
+                }
+                return null;
+            };
+            return walk(root, [root]);
+        };
+
         const SuperMagnusChat = ({ open, onClose }) => {
-            const [messages, setMessages] = useState([
-                { role: 'assistant', text: SM_READY
-                    ? SM_DISPATCHER_GREETING
-                    : 'מקור האמת (protocols.md) לא נטען. ודא שהקובץ קיים לצד ה-HTML, או שה-shim protocols_kb.js נטען.' }
-            ]);
+            // Navigation stack: [root, category, ..., leaf]. Always length ≥ 1.
+            const [navStack, setNavStack] = useState([SM_MENU_TREE]);
+            // Free-text short-circuit result. When set, supersedes the menu view.
+            const [searchResult, setSearchResult] = useState(null);
             const [input, setInput] = useState('');
             const [thinking, setThinking] = useState(false);
             const scrollRef = useRef(null);
             const inputRef = useRef(null);
+
+            const node = navStack[navStack.length - 1];
+            const isLeaf = !node.children;
+            const atRoot = navStack.length === 1;
+            const viewingResult = !!searchResult;
 
             useEffect(() => {
                 if (open && inputRef.current) setTimeout(() => inputRef.current && inputRef.current.focus(), 300);
             }, [open]);
 
             useEffect(() => {
-                if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-            }, [messages, thinking]);
+                if (scrollRef.current) scrollRef.current.scrollTop = 0;
+            }, [navStack, searchResult]);
+
+            const goTo = (child) => { setSearchResult(null); setNavStack(s => [...s, child]); };
+            const goBack = () => {
+                if (viewingResult) { setSearchResult(null); return; }
+                if (navStack.length > 1) setNavStack(s => s.slice(0, -1));
+            };
+            const goHome = () => { setSearchResult(null); setNavStack([SM_MENU_TREE]); };
+
+            const leafSections = (isLeaf && !viewingResult)
+                ? SM_SECTIONS.filter(s => smMatchLeaf(node, s)).sort((a, b) => a.slide - b.slide)
+                : [];
+
+            const jumpToLeafForSlide = (slide) => {
+                const sec = SM_SECTIONS.find(x => x.slide === slide);
+                if (!sec) return;
+                const found = smResolveLeaf(SM_MENU_TREE, sec);
+                if (found) { setSearchResult(null); setNavStack(found.path); }
+            };
 
             const ask = () => {
                 const q = input.trim();
                 if (!q || thinking) return;
-                setMessages(m => [...m, { role: 'user', text: q }]);
                 setInput('');
                 setThinking(true);
                 setTimeout(() => {
                     const res = smAnswer(q);
-                    let reply;
-                    if (!res.found) {
-                        reply = { role: 'assistant', text: SM_NOT_FOUND, notFound: true };
-                    } else {
-                        reply = { role: 'assistant', text: res.answer, sources: res.sources, intentType: res.intentType };
-                    }
-                    setMessages(m => [...m, reply]);
+                    setSearchResult({ query: q, res });
                     setThinking(false);
                 }, 180);
             };
-
             const onKey = (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    ask();
-                }
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); }
             };
 
-            const suggestions = [
-                'מה השאלות הראשוניות באירוע איתור?',
-                'כמה ימים סובב אנאפורנה?',
-                'נוהל הפעלת ASSET',
-                'סד"פ אירוע חילוץ',
-            ];
+            const kbNotReady = !SM_READY;
 
             return (
                 <>
@@ -1403,7 +1516,7 @@
                         className={`sm-backdrop fixed inset-0 bg-black/60 z-40 ${open ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
                     />
                     <aside
-                        className={`sm-panel fixed top-0 left-0 h-full w-full sm:w-[420px] bg-mn-900 border-l border-mn-700 z-50 flex flex-col shadow-2xl ${open ? '' : 'closed'}`}
+                        className={`sm-panel fixed top-0 left-0 h-full w-full sm:w-[460px] bg-mn-900 border-l border-mn-700 z-50 flex flex-col shadow-2xl ${open ? '' : 'closed'}`}
                         dir="rtl"
                         aria-hidden={!open}
                     >
@@ -1420,35 +1533,125 @@
                             <button onClick={onClose} className="text-mn-tm hover:text-white w-8 h-8 rounded hover:bg-mn-700 flex items-center justify-center text-lg transition-colors" aria-label="סגור">✕</button>
                         </div>
 
+                        {(!atRoot || viewingResult) && (
+                            <div className="px-4 py-2 bg-mn-800 border-b border-mn-700 flex items-center flex-wrap gap-x-2 gap-y-1 text-[11px] text-mn-tm">
+                                <button onClick={goHome} className="text-mn-gold hover:text-mn-goldh font-bold">תפריט ראשי</button>
+                                {viewingResult ? (
+                                    <>
+                                        <span className="text-mn-td">‹</span>
+                                        <span className="text-mn-t truncate max-w-[220px]" title={searchResult.query}>חיפוש: "{searchResult.query}"</span>
+                                    </>
+                                ) : navStack.slice(1).map((n, i, arr) => (
+                                    <span key={n.id} className="flex items-center gap-2">
+                                        <span className="text-mn-td">‹</span>
+                                        <span className={i === arr.length - 1 ? 'text-mn-t font-bold' : ''}>{n.label}</span>
+                                    </span>
+                                ))}
+                            </div>
+                        )}
+
                         <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-thin px-4 py-4 space-y-3">
-                            {messages.map((m, i) => (
-                                <div key={i} className={`sm-msg-bubble flex ${m.role === 'user' ? 'justify-start' : 'justify-end'}`}>
-                                    <div className={`max-w-[85%] rounded px-4 py-2.5 text-sm leading-relaxed ${
-                                        m.role === 'user'
-                                            ? 'bg-mn-gold text-mn-950 font-semibold'
-                                            : m.notFound
-                                                ? 'bg-mn-800 border border-red-500/40 text-red-300'
-                                                : 'bg-mn-800 border border-mn-700 text-mn-t'
-                                    }`}>
-                                        {m.intentType && (
-                                            <div className="mb-1.5 flex justify-end">
-                                                {m.intentType === 'operational'
+                            {kbNotReady && (
+                                <div className="bg-mn-800 border border-red-500/40 rounded p-4 text-sm text-red-300">
+                                    מקור האמת (protocols.md) לא נטען. ודא שהקובץ קיים לצד ה-HTML, או שה-shim protocols_kb.js נטען.
+                                </div>
+                            )}
+
+                            {atRoot && !viewingResult && !kbNotReady && (
+                                <div className="mb-2 bg-mn-800 border border-mn-700 rounded px-4 py-3 text-sm text-mn-t leading-relaxed">
+                                    <div className="text-mn-gold text-[11px] font-bold uppercase tracking-wider mb-1">שלום</div>
+                                    {SM_DISPATCHER_GREETING}
+                                    <div className="text-[11px] text-mn-td mt-2">בחר קטגוריה כדי להתחיל, או הקלד שאלה חופשית למטה.</div>
+                                </div>
+                            )}
+
+                            {viewingResult && (
+                                searchResult.res && searchResult.res.found ? (
+                                    <div className="bg-mn-800 border border-mn-700 rounded">
+                                        <div className="px-3 py-2 border-b border-mn-700 flex items-center justify-between gap-2">
+                                            <div className="text-[11px] text-mn-td font-bold uppercase tracking-wider">תוצאת חיפוש</div>
+                                            {searchResult.res.intentType && (
+                                                searchResult.res.intentType === 'operational'
                                                     ? <span className="text-[9px] font-bold tracking-widest uppercase px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300 border border-orange-500/30">⚙ מבצעי</span>
                                                     : <span className="text-[9px] font-bold tracking-widest uppercase px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30">ℹ מידע</span>
-                                                }
-                                            </div>
-                                        )}
-                                        {m.text && <div className="whitespace-pre-wrap">{m.text}</div>}
-                                        {m.sources && m.sources.length > 0 && (
-                                            <div className="mt-2 pt-2 border-t border-mn-700/60 text-[10px] text-mn-td">
-                                                {m.sources.length === 1
-                                                    ? `מקור: שקף ${m.sources[0]}`
-                                                    : `מקורות: שקפים ${m.sources.join(', ')}`}
+                                            )}
+                                        </div>
+                                        <div className="p-4 text-sm text-mn-t whitespace-pre-wrap leading-relaxed">{searchResult.res.answer}</div>
+                                        {searchResult.res.sources && searchResult.res.sources.length > 0 && (
+                                            <div className="px-4 pb-3 text-[10px] text-mn-td flex items-center justify-between gap-2 flex-wrap">
+                                                <span>
+                                                    {searchResult.res.sources.length === 1
+                                                        ? `מקור: שקף ${searchResult.res.sources[0]}`
+                                                        : `מקורות: שקפים ${searchResult.res.sources.join(', ')}`}
+                                                </span>
+                                                <button
+                                                    onClick={() => jumpToLeafForSlide(searchResult.res.sources[0])}
+                                                    className="text-mn-gold hover:text-mn-goldh font-bold"
+                                                >
+                                                    פתח בתפריט ←
+                                                </button>
                                             </div>
                                         )}
                                     </div>
-                                </div>
-                            ))}
+                                ) : (
+                                    <div className="bg-mn-800 border border-red-500/40 rounded p-4">
+                                        <div className="text-red-300 text-sm font-bold mb-1">{SM_NOT_FOUND}</div>
+                                        <div className="text-mn-tm text-[12px]">נסה לנסח מחדש, או עבור לתפריט לחיפוש לפי קטגוריה.</div>
+                                    </div>
+                                )
+                            )}
+
+                            {!viewingResult && node.children && (
+                                <>
+                                    <div className="text-[11px] text-mn-td font-bold uppercase tracking-wider mb-1">
+                                        {atRoot ? 'בחר קטגוריה' : `${node.label} — בחר נושא`}
+                                    </div>
+                                    <div className="grid grid-cols-1 gap-2">
+                                        {node.children.map(child => (
+                                            <button
+                                                key={child.id}
+                                                onClick={() => goTo(child)}
+                                                className="text-right bg-mn-800 hover:bg-mn-700 border border-mn-600 hover:border-mn-gold rounded px-4 py-3 text-sm text-mn-t hover:text-white transition-colors flex items-center justify-between group"
+                                            >
+                                                <span className="font-semibold">{child.label}</span>
+                                                <span className="text-mn-td group-hover:text-mn-gold text-lg">‹</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+
+                            {!viewingResult && isLeaf && (
+                                leafSections.length === 0 ? (
+                                    <div className="bg-mn-800 border border-mn-700 rounded p-4 text-mn-tm text-sm">
+                                        אין שקפים מתויגים לנושא זה במסמך.
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="text-[11px] text-mn-td mb-1">{leafSections.length} שקפים רלוונטיים</div>
+                                        {leafSections.map((sec, i) => (
+                                            <details key={sec.slide} open={i < 2} className="bg-mn-800 border border-mn-700 rounded overflow-hidden">
+                                                <summary className="px-4 py-2.5 bg-mn-700/40 hover:bg-mn-700 flex items-center justify-between text-sm cursor-pointer">
+                                                    <span className="font-bold text-mn-t">{sec.title}</span>
+                                                    <span className="text-[10px] text-mn-td shrink-0 mr-2">שקף {sec.slide}</span>
+                                                </summary>
+                                                <div className="px-4 py-3 text-sm text-mn-t leading-relaxed">
+                                                    {sec.bullets && sec.bullets.length > 0 ? (
+                                                        <ul className="space-y-1.5 list-disc pr-5 marker:text-mn-gold">
+                                                            {sec.bullets.map((b, j) => <li key={j} className="text-mn-t">{b}</li>)}
+                                                        </ul>
+                                                    ) : sec.lines && sec.lines.length > 0 ? (
+                                                        <div className="whitespace-pre-wrap">{sec.lines.join('\n')}</div>
+                                                    ) : (
+                                                        <div className="text-mn-td italic">אין תוכן טקסטואלי בשקף זה.</div>
+                                                    )}
+                                                </div>
+                                            </details>
+                                        ))}
+                                    </>
+                                )
+                            )}
+
                             {thinking && (
                                 <div className="flex justify-end">
                                     <div className="bg-mn-800 border border-mn-700 rounded px-4 py-3 sm-typing">
@@ -1458,24 +1661,19 @@
                             )}
                         </div>
 
-                        {messages.length <= 1 && (
-                            <div className="px-4 pb-2">
-                                <div className="text-[11px] text-mn-td mb-2 font-bold">הצעות לשאלות:</div>
-                                <div className="flex flex-wrap gap-2">
-                                    {suggestions.map((s, i) => (
-                                        <button
-                                            key={i}
-                                            onClick={() => { setInput(s); setTimeout(() => inputRef.current && inputRef.current.focus(), 0); }}
-                                            className="text-[11px] bg-mn-800 hover:bg-mn-700 border border-mn-600 hover:border-mn-gold text-mn-tm hover:text-mn-gold px-3 py-1.5 rounded transition-colors"
-                                        >
-                                            {s}
-                                        </button>
-                                    ))}
-                                </div>
+                        {(!atRoot || viewingResult) && (
+                            <div className="px-4 py-2 bg-mn-800 border-t border-mn-700 flex gap-2">
+                                <button onClick={goBack} className="text-[12px] bg-mn-800 hover:bg-mn-700 border border-mn-600 hover:border-mn-gold text-mn-t hover:text-mn-gold px-3 py-1.5 rounded transition-colors">
+                                    ← חזרה
+                                </button>
+                                <button onClick={goHome} className="text-[12px] bg-mn-800 hover:bg-mn-700 border border-mn-600 hover:border-mn-gold text-mn-t hover:text-mn-gold px-3 py-1.5 rounded transition-colors">
+                                    תפריט ראשי
+                                </button>
                             </div>
                         )}
 
                         <div className="p-3 border-t border-mn-700 bg-mn-800">
+                            <div className="text-[10px] text-mn-td mb-2">או הקלד שאלה חופשית לקיצור דרך:</div>
                             <div className="flex gap-2 items-end">
                                 <textarea
                                     ref={inputRef}
@@ -1483,7 +1681,7 @@
                                     onChange={e => setInput(e.target.value)}
                                     onKeyDown={onKey}
                                     rows={1}
-                                    placeholder="שאל שאלה על הפרוטוקולים…"
+                                    placeholder="חיפוש חופשי בפרוטוקולים…"
                                     className="flex-1 bg-mn-950 border border-mn-700 focus:border-mn-gold rounded px-3 py-2.5 text-sm text-mn-t placeholder:text-mn-td outline-none resize-none max-h-32"
                                 />
                                 <button
@@ -1491,7 +1689,7 @@
                                     disabled={!input.trim() || thinking}
                                     className="bg-mn-gold hover:bg-mn-goldh disabled:opacity-40 disabled:cursor-not-allowed text-mn-950 font-black px-4 py-2.5 rounded text-sm transition-colors uppercase"
                                 >
-                                    שלח
+                                    חפש
                                 </button>
                             </div>
                             <div className="text-[10px] text-mn-td mt-2 text-center">
