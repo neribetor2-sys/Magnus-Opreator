@@ -1,0 +1,1422 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Magnus - ניהול חכם של אירועים</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Heebo', 'system-ui', '-apple-system', 'sans-serif']
+                    },
+                    colors: {
+                        'magnus-bg':         '#0a1410',
+                        'magnus-panel':      '#13201a',
+                        'magnus-panel-2':    '#172821',
+                        'magnus-surface':    '#1f2d25',
+                        'magnus-border':     '#2a382f',
+                        'magnus-border-lt':  '#3a4a40',
+                        'magnus-orange':     '#e8915a',
+                        'magnus-orange-hi':  '#f2a572',
+                        'magnus-orange-lo':  '#cc7a42',
+                        'magnus-gold':       '#e8b86a',
+                        'magnus-gold-hi':    '#f2c87e',
+                        'magnus-cream':      '#f5eee0',
+                        'magnus-text':       '#ece7dc',
+                        'magnus-muted':      '#a89e8e',
+                        'magnus-muted-dk':   '#6e685c',
+                        'magnus-accent':     '#7fb89a',
+                        'magnus-danger':     '#d96a5c'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Heebo', system-ui, -apple-system, sans-serif;
+            background-color: #0a1410;
+            color: #ece7dc;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        .incident-card { transition: all 0.3s ease; position: relative; overflow: visible; }
+        .incident-card.closed-anim { opacity: 0; transform: scale(0.95); }
+        .incident-card:focus-within { z-index: 30; }
+        .line-new { background: rgba(232, 145, 90, 0.09); border-right: 2px solid #e8915a; }
+        .task-fade { animation: fadeOut 0.4s forwards; }
+        @keyframes fadeOut { to { opacity: 0; transform: translateX(10px); } }
+        @keyframes pulse-red { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .blink-red { animation: pulse-red 2s infinite; }
+        @keyframes alert-glow { 0%, 100% { box-shadow: 0 0 20px rgba(232,145,90,0.5); } 50% { box-shadow: 0 0 70px rgba(232,145,90,1); } }
+        .alert-glow { animation: alert-glow 0.9s infinite; }
+        .scroll-thin::-webkit-scrollbar { width: 6px; }
+        .scroll-thin::-webkit-scrollbar-thumb { background: #2a382f; border-radius: 3px; }
+        .scroll-thin::-webkit-scrollbar-thumb:hover { background: #3a4a40; }
+        details > summary { list-style: none; cursor: pointer; }
+        details > summary::-webkit-details-marker { display: none; }
+        input[type="date"]::-webkit-calendar-picker-indicator,
+        input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.7) sepia(0.2); cursor: pointer; }
+        input[type="date"], input[type="time"] { direction: ltr; text-align: left; }
+        .magnus-logo {
+            font-weight: 900;
+            letter-spacing: 0.08em;
+            font-family: 'Heebo', system-ui, sans-serif;
+        }
+        .brand-divider {
+            background: linear-gradient(90deg, transparent, #e8915a 20%, #e8915a 80%, transparent);
+            height: 2px;
+        }
+        /* Logo mark */
+        .magnus-mark {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #e8915a 0%, #cc7a42 100%);
+            color: #0a1410;
+            font-weight: 900;
+            font-size: 18px;
+            box-shadow: 0 2px 10px rgba(232,145,90,0.25);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // ---------- Parser & Generator (preserve exact structure) ----------
+
+        // Matches: [Name | Type | Location, *Name | Type | Location *, Name | Type | Location
+        const EVENT_RE = /^\s*[\[*]?\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*[*]?\s*$/;
+        const TASK_RE = /^\s*(?:[•\-])/;
+        const TASKS_HEADER_RE = /^\s*משימות\s*:/;
+        const GENERAL_TASKS_HEADER_RE = /^\s*משימות\s*כללי\s*:/;
+
+        const rid = () => Math.random().toString(36).slice(2, 10);
+
+        // Detects valid 24-hour times (00:00–23:59) in task text
+        const TIME_RE = /\b((?:[01]?\d|2[0-3]):[0-5]\d)\b/;
+        const normalizeTime = t => { const [h, m] = t.split(':'); return `${h.padStart(2,'0')}:${m}`; };
+
+        const getDateStr = (d = new Date()) =>
+            `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
+        const fmtDate = (s) => { const [, m, d] = s.split('-'); return `${d}/${m}`; };
+
+        const getScheduledTasks = (state) => {
+            const now = new Date();
+            const todayStr = getDateStr(now);
+            const tomorrowStr = getDateStr(new Date(now.getTime() + 86400000));
+
+            const dateLabel = (date) => {
+                if (date === todayStr) return null;
+                if (date === tomorrowStr) return 'מחר';
+                return fmtDate(date);
+            };
+
+            const result = [];
+            const activeIncs = (state.incidents || []).filter(i => !i.closed);
+            for (const inc of activeIncs) {
+                for (const task of inc.tasks.filter(t => !t.done && t.scheduledDate && t.scheduledTime)) {
+                    result.push({ taskId: task.id, incidentId: inc.id, incidentName: inc.name, date: task.scheduledDate, time: task.scheduledTime, text: task.text, source: 'incident', dateLabel: dateLabel(task.scheduledDate) });
+                }
+            }
+            for (const task of (state.generalTasks || []).filter(t => !t.done && t.scheduledDate && t.scheduledTime)) {
+                result.push({ taskId: task.id, incidentId: null, incidentName: 'משימות כלליות', date: task.scheduledDate, time: task.scheduledTime, text: task.text, source: 'general', dateLabel: dateLabel(task.scheduledDate) });
+            }
+            for (const task of (state.manualScheduledTasks || []).filter(t => t.time)) {
+                const date = task.date || todayStr;
+                result.push({ taskId: task.id, incidentId: null, incidentName: 'ידני', date, time: task.time, text: task.text, source: 'manual', dateLabel: dateLabel(date) });
+            }
+            result.sort((a, b) => (`${a.date} ${a.time}`).localeCompare(`${b.date} ${b.time}`));
+            return result;
+        };
+
+        const parseProtocol = (raw) => {
+            const state = { prefix: '', suffix: '', incidents: [] };
+            if (!raw || !raw.trim()) return state;
+
+            const lines = raw.split('\n');
+            let prefixLines = [];
+            let suffixLines = [];
+            let current = null;
+            let section = 'details';
+            let phase = 'prefix';
+
+            const flush = () => { if (current) state.incidents.push(current); current = null; };
+
+            // Inline general tasks collected before the closing ']'
+            let inlineGenHeader = null;
+            let inlineGenTasks = [];
+            let inlineGenTrailing = [];
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                const m = trimmed.match(EVENT_RE);
+
+                if (m) {
+                    flush();
+                    phase = 'events';
+                    current = {
+                        id: rid(),
+                        rawHeader: line,
+                        name: m[1].trim(),
+                        type: m[2].trim(),
+                        location: m[3].trim(),
+                        detailLines: [],
+                        newDetailIds: [],
+                        tasksHeaderLine: null,
+                        tasks: [],
+                        trailingLines: [],
+                        closed: false,
+                    };
+                    section = 'details';
+                    continue;
+                }
+
+                if (phase === 'prefix') { prefixLines.push(line); continue; }
+
+                // Detect "משימות כללי:" anywhere in the events phase — stops the current incident
+                if ((phase === 'events' || phase === 'general') && GENERAL_TASKS_HEADER_RE.test(trimmed)) {
+                    flush();
+                    phase = 'general';
+                    inlineGenHeader = line;
+                    continue;
+                }
+
+                if (phase === 'general') {
+                    if (TASK_RE.test(trimmed)) {
+                        inlineGenTasks.push({
+                            id: rid(),
+                            rawLine: line,
+                            text: trimmed.replace(/^[•\-]\s*/, '').replace(/^[\s\u2060\u2063⁠]+/, '').trim(),
+                            done: false,
+                        });
+                    } else if (trimmed === '') {
+                        inlineGenTrailing.push(line);
+                    }
+                    continue;
+                }
+
+                if (phase === 'events' && trimmed.startsWith(']')) {
+                    flush();
+                    phase = 'suffix';
+                    suffixLines.push(line);
+                    continue;
+                }
+                if (phase === 'suffix') { suffixLines.push(line); continue; }
+
+                if (!current) continue;
+
+                if (TASKS_HEADER_RE.test(trimmed)) {
+                    current.tasksHeaderLine = line;
+                    section = 'tasks';
+                    continue;
+                }
+
+                if (section === 'tasks') {
+                    if (TASK_RE.test(trimmed)) {
+                        current.tasks.push({
+                            id: rid(),
+                            rawLine: line,
+                            text: trimmed.replace(/^[•\-]\s*/, '').replace(/^[\s\u2060\u2063⁠]+/, '').trim(),
+                            done: false,
+                        });
+                    } else if (trimmed === '') {
+                        current.trailingLines.push(line);
+                    } else if (current.tasks.length > 0) {
+                        // continuation of previous task (rare)
+                        const last = current.tasks[current.tasks.length - 1];
+                        last.rawLine = last.rawLine + '\n' + line;
+                        last.text = (last.text + ' ' + trimmed).trim();
+                    } else {
+                        current.trailingLines.push(line);
+                    }
+                } else {
+                    current.detailLines.push(line);
+                }
+            }
+            flush();
+            state.prefix = prefixLines.join('\n');
+
+            // Extract general tasks from suffix lines (only if not already found inline)
+            const cleanSuffix = [];
+            let genHeader = inlineGenHeader;
+            let genTasks = [...inlineGenTasks];
+            let genTrailing = [...inlineGenTrailing];
+            let inGen = false;
+            for (const line of suffixLines) {
+                const t = line.trim();
+                if (!inlineGenHeader && GENERAL_TASKS_HEADER_RE.test(t)) {
+                    genHeader = line;
+                    inGen = true;
+                } else if (inGen && TASK_RE.test(t)) {
+                    genTasks.push({
+                        id: rid(),
+                        rawLine: line,
+                        text: t.replace(/^[•\-]\s*/, '').replace(/^[\s\u2060\u2063⁠]+/, '').trim(),
+                        done: false,
+                    });
+                } else if (inGen && t === '') {
+                    genTrailing.push(line);
+                } else {
+                    if (inGen && t !== '') inGen = false;
+                    cleanSuffix.push(line);
+                }
+            }
+            state.suffix = cleanSuffix.join('\n');
+            state.generalTasksHeaderLine = genHeader;
+            state.generalTasks = genTasks;
+            state.generalTasksTrailingLines = genTrailing;
+            return state;
+        };
+
+        const generateProtocol = (state) => {
+            const parts = [];
+            if (state.prefix !== '') parts.push(state.prefix);
+
+            const openIncidents = state.incidents.filter(i => !i.closed);
+            openIncidents.forEach(inc => {
+                parts.push(inc.rawHeader);
+                if (inc.detailLines.length) parts.push(inc.detailLines.join('\n'));
+                const openTasks = inc.tasks.filter(t => !t.done);
+                if (inc.tasksHeaderLine !== null) {
+                    parts.push(inc.tasksHeaderLine);
+                    openTasks.forEach(t => parts.push(t.rawLine));
+                    if (inc.trailingLines.length) parts.push(inc.trailingLines.join('\n'));
+                } else if (openTasks.length > 0) {
+                    parts.push('משימות:');
+                    openTasks.forEach(t => parts.push(t.rawLine));
+                }
+            });
+
+            if (state.suffix !== '') parts.push(state.suffix);
+
+            const openGenTasks = (state.generalTasks || []).filter(t => !t.done);
+            if (openGenTasks.length > 0) {
+                parts.push(state.generalTasksHeaderLine || 'משימות כללי:');
+                openGenTasks.forEach(t => parts.push(t.rawLine));
+                if (state.generalTasksTrailingLines && state.generalTasksTrailingLines.length)
+                    parts.push(state.generalTasksTrailingLines.join('\n'));
+            }
+
+            return parts.join('\n');
+        };
+
+        // ---------- NLP: detect task completion ----------
+
+        const DONE_RE = /\b(done|closed|complete[d]?|fixed)\b|בוצע(ה|ו)?|הסתיים(ה|ו)?|הושלם(ה|ו)?|טופל(ה|ו)?|נסגר(ה|ו)?|סיימנו|סיימתי|סומן(ה|ו)?\s*(כ)?בוצע/i;
+
+        const tokenize = (s) => (s || '')
+            .replace(/[.,:;!?"'״׳()\[\]]/g, ' ')
+            .split(/\s+/)
+            .filter(w => w.length >= 2);
+
+        const detectTaskCompletion = (input, openTasks) => {
+            if (!openTasks.length) return null;
+            if (!DONE_RE.test(input)) return null;
+
+            const cleaned = input.replace(DONE_RE, ' ').trim();
+            const inputTokens = tokenize(cleaned);
+
+            let best = null;
+            let bestScore = 0;
+
+            for (const task of openTasks) {
+                const taskTokens = tokenize(task.text);
+                if (!taskTokens.length) continue;
+                let matches = 0;
+                for (const it of inputTokens) {
+                    if (taskTokens.some(tt => tt === it || tt.includes(it) || it.includes(tt))) matches++;
+                }
+                const score = matches / Math.max(taskTokens.length, 1);
+                if (score > bestScore) { bestScore = score; best = task; }
+            }
+
+            // if no content beyond the "done" keyword and only one open task → mark it
+            if (!inputTokens.length && openTasks.length === 1) return openTasks[0];
+            if (bestScore >= 0.25) return best;
+            return null;
+        };
+
+        // ---------- Components ----------
+
+        const AddIncidentModal = ({ onClose, onAdd }) => {
+            const [name, setName] = useState('');
+            const [type, setType] = useState('');
+            const [location, setLocation] = useState('');
+            const [details, setDetails] = useState('');
+            const [tasks, setTasks] = useState('');
+
+            const submit = () => {
+                if (!name.trim() || !type.trim() || !location.trim()) return;
+                onAdd({ name: name.trim(), type: type.trim(), location: location.trim(), details, tasks });
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-lg shadow-2xl" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-lg font-bold mb-4 text-sky-400">הוספת אירוע חדש</h3>
+                        <div className="space-y-3">
+                            <input value={name} onChange={e => setName(e.target.value)} placeholder="שם"
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-500"/>
+                            <input value={type} onChange={e => setType(e.target.value)} placeholder="סוג פעולה (למשל: חילוץ)"
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-500"/>
+                            <input value={location} onChange={e => setLocation(e.target.value)} placeholder="מיקום"
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-500"/>
+                            <textarea value={details} onChange={e => setDetails(e.target.value)} placeholder="פרטים (שורה אחר שורה)"
+                                rows="5"
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-500"/>
+                            <textarea value={tasks} onChange={e => setTasks(e.target.value)} placeholder="משימות (שורה אחר שורה)"
+                                rows="3"
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-sky-500"/>
+                        </div>
+                        <div className="flex gap-2 mt-5">
+                            <button onClick={submit} className="flex-1 bg-sky-600 hover:bg-sky-500 py-2.5 rounded-lg font-bold">הוסף</button>
+                            <button onClick={onClose} className="px-4 bg-slate-800 hover:bg-slate-700 py-2.5 rounded-lg">ביטול</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const OutputModal = ({ text, onClose }) => {
+            const [copied, setCopied] = useState(false);
+            const copy = () => {
+                navigator.clipboard.writeText(text);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+            };
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-bold text-emerald-400">פלט סופי</h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-white text-2xl leading-none">×</button>
+                        </div>
+                        <pre className="bg-slate-950 border border-slate-800 rounded-xl p-5 font-mono text-sm whitespace-pre-wrap text-slate-200 flex-1 overflow-auto scroll-thin">{text}</pre>
+                        <button onClick={copy} className={`mt-4 py-3 rounded-xl font-bold transition-colors ${copied ? 'bg-emerald-500' : 'bg-emerald-600 hover:bg-emerald-500'}`}>
+                            {copied ? 'הועתק ✓' : 'העתק ללוח'}
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        const GeneralTasksPanel = ({ tasks, onToggleTask, onEditTask, onDeleteTask, onAddTask }) => {
+            const [editingId, setEditingId] = useState(null);
+            const [editValue, setEditValue] = useState('');
+            const [addValue, setAddValue] = useState('');
+            const [fadingIds, setFadingIds] = useState([]);
+
+            const openTasks = (tasks || []).filter(t => !t.done);
+            const doneTasks = (tasks || []).filter(t => t.done);
+
+            const submitAdd = () => {
+                const text = addValue.trim();
+                if (!text) return;
+                onAddTask(text);
+                setAddValue('');
+            };
+
+            const commitEdit = (id, value) => {
+                if (value.trim()) onEditTask(id, value);
+                setEditingId(null);
+            };
+
+            return (
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4" style={{borderRightWidth:'4px',borderRightColor:'#f59e0b'}}>
+                    <p className="text-[11px] font-bold text-amber-500 uppercase tracking-widest mb-3">
+                        משימות כלליות ({openTasks.length})
+                    </p>
+                    <div className="flex gap-1 mb-3">
+                        <input
+                            type="text"
+                            value={addValue}
+                            onChange={e => setAddValue(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') submitAdd(); }}
+                            placeholder="הוסף משימה כללית..."
+                            className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-amber-500"
+                        />
+                        <button onClick={submitAdd} disabled={!addValue.trim()}
+                            className="bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                            +
+                        </button>
+                    </div>
+                    {openTasks.length === 0 && doneTasks.length === 0 && (
+                        <p className="text-xs text-slate-600 italic">אין משימות כלליות</p>
+                    )}
+                    <div className="space-y-1">
+                        {openTasks.map(t => (
+                            <div key={t.id} className={`group/gt flex items-center gap-1.5 ${fadingIds.includes(t.id) ? 'task-fade' : ''}`}>
+                                {editingId === t.id ? (
+                                    <input
+                                        autoFocus
+                                        className="flex-1 bg-slate-800 border border-amber-600 rounded px-1.5 py-0.5 text-xs outline-none"
+                                        value={editValue}
+                                        onChange={e => setEditValue(e.target.value)}
+                                        onKeyDown={e => {
+                                            if (e.key === 'Enter') commitEdit(t.id, editValue);
+                                            else if (e.key === 'Escape') setEditingId(null);
+                                        }}
+                                        onBlur={() => commitEdit(t.id, editValue)}
+                                    />
+                                ) : (
+                                    <>
+                                        <input type="checkbox" checked={false}
+                                            onChange={() => {
+                                                setFadingIds(prev => [...prev, t.id]);
+                                                setTimeout(() => onToggleTask(t.id), 300);
+                                            }}
+                                            className="rounded bg-slate-800 border-slate-700 text-amber-500 shrink-0"/>
+                                        <span className="flex-1 text-xs text-slate-300 group-hover/gt:text-white leading-snug">{t.text}</span>
+                                        <button
+                                            onClick={() => { setEditingId(t.id); setEditValue(t.text); }}
+                                            className="opacity-0 group-hover/gt:opacity-100 text-slate-600 hover:text-amber-400 leading-none shrink-0 transition-opacity"
+                                            title="ערוך">✎</button>
+                                        <button
+                                            onClick={() => onDeleteTask(t.id)}
+                                            className="opacity-0 group-hover/gt:opacity-100 text-slate-600 hover:text-red-400 text-base leading-none shrink-0 transition-opacity"
+                                            title="מחק">×</button>
+                                    </>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                    {doneTasks.length > 0 && (
+                        <details className="mt-2 pt-2 border-t border-slate-800 group/hist">
+                            <summary className="text-[10px] font-bold text-slate-600 cursor-pointer hover:text-slate-400 flex items-center gap-1">
+                                <span className="group-open/hist:rotate-90 inline-block transition-transform">▸</span>
+                                הושלמו ({doneTasks.length})
+                            </summary>
+                            <div className="mt-1.5 space-y-0.5">
+                                {doneTasks.map(t => (
+                                    <div key={t.id} className="flex items-start gap-1.5">
+                                        <span className="text-emerald-500 text-xs shrink-0">✓</span>
+                                        <span className="text-xs text-slate-500 line-through leading-snug">{t.text}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </details>
+                    )}
+                </div>
+            );
+        };
+
+        const ClosedIncidentCard = ({ incident }) => {
+            const doneTasks = incident.tasks.filter(t => t.done);
+            const openTasks = incident.tasks.filter(t => !t.done);
+
+            return (
+                <div className="incident-card rounded-2xl p-5 shadow border border-r-4"
+                    style={{background:'rgba(15,23,42,0.5)', borderColor:'rgba(51,65,85,0.5)', borderRightColor:'#475569', opacity:0.65}}>
+                    <div className="flex justify-between items-start mb-3 gap-2">
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2 mb-0.5">
+                                <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest">{incident.type}</span>
+                                <span className="text-[9px] font-black bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded-full uppercase tracking-widest">סגור</span>
+                            </div>
+                            <h3 className="text-lg font-bold truncate text-slate-400">{incident.name}</h3>
+                            <p className="text-xs text-slate-600 truncate">📍 {incident.location}</p>
+                        </div>
+                    </div>
+
+                    <details className="mb-3 group">
+                        <summary className="text-[11px] font-bold text-slate-600 uppercase tracking-wider mb-2 flex items-center gap-1 cursor-pointer select-none hover:text-slate-500">
+                            <span className="group-open:rotate-90 inline-block transition-transform">▸</span>
+                            פרטים ({incident.detailLines.length})
+                        </summary>
+                        <div className="bg-slate-950/40 border border-slate-800/50 rounded-lg p-3 max-h-48 overflow-y-auto scroll-thin text-xs text-slate-500 space-y-0.5">
+                            {incident.detailLines.length === 0 && <div className="text-slate-700 italic">אין פרטים</div>}
+                            {incident.detailLines.map((line, i) => (
+                                <div key={i} className="px-1.5 py-0.5 whitespace-pre-wrap leading-relaxed">{line || '\u00A0'}</div>
+                            ))}
+                        </div>
+                    </details>
+
+                    {incident.tasks.length > 0 && (
+                        <details className="group/tasks">
+                            <summary className="text-[11px] font-bold text-slate-600 uppercase tracking-wider cursor-pointer select-none hover:text-slate-500 flex items-center gap-1">
+                                <span className="group-open/tasks:rotate-90 inline-block transition-transform">▸</span>
+                                משימות ({incident.tasks.length})
+                            </summary>
+                            <div className="mt-2 space-y-1">
+                                {openTasks.map(t => (
+                                    <div key={t.id} className="flex items-start gap-2">
+                                        <span className="text-slate-600 text-xs mt-0.5 shrink-0">○</span>
+                                        <span className="text-xs text-slate-500 leading-snug">{t.text}</span>
+                                    </div>
+                                ))}
+                                {doneTasks.map(t => (
+                                    <div key={t.id} className="flex items-start gap-2">
+                                        <span className="text-slate-600 text-xs mt-0.5 shrink-0">✓</span>
+                                        <span className="text-xs text-slate-600 line-through leading-snug">{t.text}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </details>
+                    )}
+                </div>
+            );
+        };
+
+        const IncidentCard = ({ incident, onAddUpdate, onAddTask, onToggleTask, onClose, onEditDetailLine, onEditTask, onDeleteDetailLine, onDeleteTask }) => {
+            const [flash, setFlash] = useState(null);
+            const [updateVal, setUpdateVal] = useState('');
+            const [taskVal, setTaskVal] = useState('');
+            const [taskDate, setTaskDate] = useState('');
+            const [taskTime, setTaskTime] = useState('');
+            const taskTimeRef = useRef(null);
+            const [fadingTaskIds, setFadingTaskIds] = useState([]);
+            const [editingDetail, setEditingDetail] = useState(null); // { idx, value }
+            const [editingTask, setEditingTask] = useState(null);     // { id, value }
+
+            const openTasks = incident.tasks.filter(t => !t.done);
+            const doneTasks = incident.tasks.filter(t => t.done);
+
+            const handleAddUpdate = () => {
+                const text = updateVal.trim();
+                if (!text) return;
+                onAddUpdate(incident.id, text);
+                setUpdateVal('');
+                setFlash({ type: 'detail', text });
+                setTimeout(() => setFlash(null), 2000);
+            };
+
+            const handleAddTask = () => {
+                const text = taskVal.trim();
+                if (!text) return;
+                const scheduledDate = taskDate || null;
+                const scheduledTime = (taskDate && taskTime) ? taskTime : null;
+                onAddTask(incident.id, text, scheduledDate, scheduledTime);
+                setTaskVal('');
+                setTaskDate('');
+                setTaskTime('');
+                if (taskTimeRef.current) taskTimeRef.current.value = '';
+                setFlash({ type: 'task-added', text, hasTime: !!(scheduledDate && scheduledTime) });
+                setTimeout(() => setFlash(null), 2500);
+            };
+
+            const confirmClose = () => {
+                if (window.confirm(`לסגור את האירוע: ${incident.name}?`)) onClose(incident.id);
+            };
+
+            const commitDetailEdit = (idx, value) => {
+                if (value.trim()) onEditDetailLine(incident.id, idx, value);
+                setEditingDetail(null);
+            };
+
+            const commitTaskEdit = (id, value) => {
+                if (value.trim()) onEditTask(incident.id, id, value);
+                setEditingTask(null);
+            };
+
+            return (
+                <div className="incident-card bg-slate-900 rounded-2xl p-5 shadow-xl border border-slate-800 border-r-4 border-r-sky-600">
+                    <div className="flex justify-between items-start mb-3 gap-2">
+                        <div className="min-w-0">
+                            <span className="text-[10px] font-black text-sky-500 uppercase tracking-widest">{incident.type}</span>
+                            <h3 className="text-lg font-bold truncate">{incident.name}</h3>
+                            <p className="text-xs text-slate-500 truncate">📍 {incident.location}</p>
+                        </div>
+                        <button onClick={confirmClose}
+                            className="text-xs px-2.5 py-1 bg-slate-800 hover:bg-red-600/80 text-slate-300 hover:text-white rounded-md font-bold shrink-0">
+                            סגור אירוע
+                        </button>
+                    </div>
+
+                    <details className="mb-3 group" open>
+                        <summary className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
+                            <span className="group-open:rotate-90 inline-block transition-transform">▸</span>
+                            פרטים ({incident.detailLines.length})
+                        </summary>
+                        <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-3 max-h-48 overflow-y-auto scroll-thin text-xs text-slate-300 space-y-0.5">
+                            {incident.detailLines.length === 0 && <div className="text-slate-600 italic">אין פרטים</div>}
+                            {incident.detailLines.map((line, i) => {
+                                const isNew = incident.newDetailIds && incident.newDetailIds.includes(i);
+                                const isEditing = editingDetail && editingDetail.idx === i;
+                                return (
+                                    <div key={i} className={`group/line px-1.5 py-0.5 rounded ${isNew ? 'line-new' : ''} flex items-start gap-1`}>
+                                        {isEditing ? (
+                                            <input
+                                                autoFocus
+                                                className="flex-1 w-full bg-slate-800 border border-sky-600 rounded px-1.5 py-0.5 font-mono outline-none"
+                                                value={editingDetail.value}
+                                                onChange={e => setEditingDetail({ idx: i, value: e.target.value })}
+                                                onKeyDown={e => {
+                                                    if (e.key === 'Enter') commitDetailEdit(i, editingDetail.value);
+                                                    else if (e.key === 'Escape') setEditingDetail(null);
+                                                }}
+                                                onBlur={() => commitDetailEdit(i, editingDetail.value)}
+                                            />
+                                        ) : (
+                                            <>
+                                                <span className="flex-1 whitespace-pre-wrap leading-relaxed">{line || '\u00A0'}</span>
+                                                <button
+                                                    onClick={() => setEditingDetail({ idx: i, value: line })}
+                                                    className="opacity-0 group-hover/line:opacity-100 text-slate-600 hover:text-sky-400 leading-none shrink-0 transition-opacity"
+                                                    title="ערוך">✎</button>
+                                                <button
+                                                    onClick={() => onDeleteDetailLine(incident.id, i)}
+                                                    className="opacity-0 group-hover/line:opacity-100 text-slate-600 hover:text-red-400 text-base leading-none shrink-0 transition-opacity"
+                                                    title="מחק">×</button>
+                                            </>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </details>
+
+                    {openTasks.length > 0 && (
+                        <div className="mb-3 pt-2 border-t border-slate-800">
+                            <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">משימות פתוחות ({openTasks.length})</p>
+                            <div className="space-y-1">
+                                {openTasks.map(t => {
+                                    const isEditingT = editingTask && editingTask.id === t.id;
+                                    return (
+                                        <div key={t.id} className={`group/task flex items-start gap-2 ${fadingTaskIds.includes(t.id) ? 'task-fade' : ''}`}>
+                                            {isEditingT ? (
+                                                <input
+                                                    autoFocus
+                                                    className="flex-1 bg-slate-800 border border-sky-600 rounded px-2 py-0.5 text-xs outline-none"
+                                                    value={editingTask.value}
+                                                    onChange={e => setEditingTask({ id: t.id, value: e.target.value })}
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter') commitTaskEdit(t.id, editingTask.value);
+                                                        else if (e.key === 'Escape') setEditingTask(null);
+                                                    }}
+                                                    onBlur={() => commitTaskEdit(t.id, editingTask.value)}
+                                                />
+                                            ) : (
+                                                <>
+                                                    <input type="checkbox" id={`task-${t.id}`} checked={false}
+                                                        onChange={() => {
+                                                            setFadingTaskIds(prev => [...prev, t.id]);
+                                                            setTimeout(() => onToggleTask(incident.id, t.id), 300);
+                                                        }}
+                                                        className="mt-0.5 rounded bg-slate-800 border-slate-700 text-sky-500 shrink-0"/>
+                                                    <label htmlFor={`task-${t.id}`} className="flex-1 text-xs text-slate-300 group-hover/task:text-white leading-snug cursor-pointer">{t.text}</label>
+                                                    <button
+                                                        onClick={() => setEditingTask({ id: t.id, value: t.text })}
+                                                        className="opacity-0 group-hover/task:opacity-100 text-slate-600 hover:text-sky-400 leading-none shrink-0 transition-opacity"
+                                                        title="ערוך משימה">✎</button>
+                                                    <button
+                                                        onClick={() => onDeleteTask(incident.id, t.id)}
+                                                        className="opacity-0 group-hover/task:opacity-100 text-slate-600 hover:text-red-400 text-base leading-none shrink-0 transition-opacity"
+                                                        title="מחק משימה">×</button>
+                                                </>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
+                    {doneTasks.length > 0 && (
+                        <details className="mb-3 pt-2 border-t border-slate-800 group/hist">
+                            <summary className="text-[11px] font-bold text-slate-600 uppercase tracking-wider cursor-pointer select-none hover:text-slate-400 flex items-center gap-1">
+                                <span className="group-open/hist:rotate-90 inline-block transition-transform">▸</span>
+                                משימות שהושלמו ({doneTasks.length})
+                            </summary>
+                            <div className="mt-2 space-y-1">
+                                {doneTasks.map(t => (
+                                    <div key={t.id} className="flex items-start gap-2">
+                                        <span className="text-emerald-500 text-xs mt-0.5 shrink-0">✓</span>
+                                        <span className="text-xs text-slate-500 line-through leading-snug">{t.text}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </details>
+                    )}
+
+                    <div className="pt-2 border-t border-slate-800 space-y-2">
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={updateVal}
+                                onChange={e => setUpdateVal(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddUpdate(); }}
+                                placeholder="הוסף עדכון לביומן..."
+                                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-sky-500 outline-none"
+                            />
+                            <button
+                                onClick={handleAddUpdate}
+                                disabled={!updateVal.trim()}
+                                className="shrink-0 bg-sky-700 hover:bg-sky-600 disabled:opacity-30 disabled:cursor-not-allowed px-3 py-2 rounded-lg text-xs font-bold transition-colors">
+                                + עדכון
+                            </button>
+                        </div>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={taskVal}
+                                onChange={e => setTaskVal(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddTask(); }}
+                                placeholder="הוסף משימה..."
+                                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 outline-none"
+                            />
+                            <button
+                                onClick={handleAddTask}
+                                disabled={!taskVal.trim()}
+                                className="shrink-0 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-30 disabled:cursor-not-allowed px-3 py-2 rounded-lg text-xs font-bold transition-colors">
+                                + משימה
+                            </button>
+                        </div>
+                        <div className="flex gap-2 items-center">
+                            <input
+                                type="date"
+                                dir="ltr"
+                                value={taskDate}
+                                min={getDateStr()}
+                                onChange={e => { setTaskDate(e.target.value); if (!e.target.value) { setTaskTime(''); if (taskTimeRef.current) taskTimeRef.current.value = ''; } }}
+                                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-400 focus:border-emerald-500 outline-none"
+                            />
+                            <input
+                                type="time"
+                                dir="ltr"
+                                ref={taskTimeRef}
+                                disabled={!taskDate}
+                                onChange={e => setTaskTime(e.target.value)}
+                                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-400 focus:border-emerald-500 outline-none disabled:opacity-30 disabled:cursor-not-allowed"
+                            />
+                            {taskDate && taskTime
+                                ? <span className="text-[10px] text-emerald-400 whitespace-nowrap shrink-0">⏱ מתוזמן</span>
+                                : <span className="text-[10px] text-slate-600 whitespace-nowrap shrink-0">תאריך + שעה אופציונליים</span>
+                            }
+                        </div>
+                        {flash && (
+                            <div className={`text-[11px] px-2 py-1 rounded ${
+                                flash.type === 'task-added'
+                                    ? (flash.hasTime ? 'bg-orange-900/50 text-orange-300' : 'bg-emerald-900/50 text-emerald-300')
+                                    : 'bg-sky-900/40 text-sky-300'
+                            }`}>
+                                {flash.type === 'task-added'
+                                    ? (flash.hasTime ? `⏱ משימה מתוזמנת נוספה: ${flash.text}` : `✓ משימה נוספה לרשימה: ${flash.text}`)
+                                    : `+ עדכון נוסף לביומן`}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const ScheduledTasksSidebar = ({ scheduledTasks, onAddManual, onRemoveManual, incidents, onAddIncidentTask }) => {
+            const [showForm, setShowForm] = useState(false);
+            const [newDate, setNewDate] = useState('');
+            const [newTime, setNewTime] = useState('');
+            const [newText, setNewText] = useState('');
+            const [selectedTarget, setSelectedTarget] = useState('manual');
+            const sidebarTimeRef = useRef(null);
+
+            const now = new Date();
+            const todayStr = getDateStr(now);
+            const currentTime = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+
+            const canSubmit = newDate.trim() !== '' && newTime.trim() !== '' && newText.trim() !== '';
+
+            const closeForm = () => {
+                setNewDate('');
+                setNewTime('');
+                setNewText('');
+                setSelectedTarget('manual');
+                if (sidebarTimeRef.current) sidebarTimeRef.current.value = '';
+                setShowForm(false);
+            };
+
+            const submitManual = () => {
+                if (!canSubmit) return;
+                const d = newDate.trim();
+                const t = newTime.trim();
+                const txt = newText.trim();
+                if (selectedTarget === 'manual') {
+                    onAddManual({ date: d, time: t, text: txt });
+                } else {
+                    onAddIncidentTask(selectedTarget, txt, d, t);
+                }
+                closeForm();
+            };
+
+            return (
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col" style={{borderRightWidth:'4px',borderRightColor:'#f97316'}}>
+                    <div className="flex justify-between items-center mb-3 shrink-0">
+                        <p className="text-[11px] font-bold text-orange-400 uppercase tracking-widest">
+                            ⏱ משימות מתוזמנות ({scheduledTasks.length})
+                        </p>
+                        <button
+                            onClick={() => showForm ? closeForm() : setShowForm(true)}
+                            className={`text-[11px] font-bold px-2 py-0.5 rounded-md transition-colors ${showForm ? 'bg-orange-600 text-white' : 'bg-slate-800 text-orange-400 hover:bg-orange-600 hover:text-white'}`}>
+                            {showForm ? '×' : '+ הוסף'}
+                        </button>
+                    </div>
+
+                    {showForm && (
+                        <div className="mb-3 p-3 bg-slate-800/60 border border-slate-700 rounded-xl space-y-2 shrink-0">
+                            <input
+                                type="date"
+                                dir="ltr"
+                                value={newDate}
+                                min={getDateStr()}
+                                onChange={e => { setNewDate(e.target.value); if (!e.target.value) { setNewTime(''); if (sidebarTimeRef.current) sidebarTimeRef.current.value = ''; } }}
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-sm font-mono text-orange-300 outline-none focus:border-orange-500"
+                            />
+                            <input
+                                type="time"
+                                dir="ltr"
+                                ref={sidebarTimeRef}
+                                disabled={!newDate}
+                                onChange={e => setNewTime(e.target.value)}
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-sm font-mono text-orange-300 outline-none focus:border-orange-500 disabled:opacity-30 disabled:cursor-not-allowed"
+                            />
+                            <input
+                                type="text"
+                                value={newText}
+                                onChange={e => setNewText(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') submitManual(); }}
+                                placeholder="תיאור המשימה..."
+                                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-orange-500"
+                            />
+                            <div>
+                                <label className="block text-[10px] font-bold text-slate-400 mb-1 uppercase tracking-wider">שייך לאירוע</label>
+                                <select
+                                    value={selectedTarget}
+                                    onChange={e => setSelectedTarget(e.target.value)}
+                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200 outline-none focus:border-orange-500">
+                                    <option value="manual">ידני (ללא אירוע)</option>
+                                    {(incidents || []).map(inc => (
+                                        <option key={inc.id} value={inc.id}>{inc.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <button
+                                onClick={submitManual}
+                                disabled={!canSubmit}
+                                className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed py-1.5 rounded-lg text-xs font-bold transition-colors">
+                                הוסף משימה
+                            </button>
+                        </div>
+                    )}
+
+                    {scheduledTasks.length === 0 ? (
+                        <p className="text-xs text-slate-600 italic">אין משימות עם שעה מוגדרת</p>
+                    ) : (
+                        <div className="space-y-2 overflow-y-auto scroll-thin flex-1">
+                            {scheduledTasks.map(task => {
+                                const isPast = task.date < todayStr || (task.date === todayStr && task.time <= currentTime);
+                                return (
+                                    <div key={task.taskId} className={`rounded-lg p-2.5 border ${isPast ? 'border-red-800 bg-red-950/30' : 'border-slate-700 bg-slate-800/50'}`}>
+                                        <div className="flex items-center justify-between gap-1 mb-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`text-sm font-mono font-bold ${isPast ? 'text-red-400 blink-red' : 'text-orange-400'}`}>{task.time}</span>
+                                                {isPast && <span className="text-[10px] font-black text-red-500">עבר!</span>}
+                                                {!isPast && task.dateLabel && <span className="text-[10px] font-bold text-slate-400">{task.dateLabel}</span>}
+                                            </div>
+                                            {task.source === 'manual' && (
+                                                <button
+                                                    onClick={() => onRemoveManual(task.taskId)}
+                                                    className="text-slate-600 hover:text-red-400 text-base leading-none transition-colors shrink-0"
+                                                    title="הסר">×</button>
+                                            )}
+                                        </div>
+                                        <p className="text-xs text-slate-300 leading-snug">{task.text}</p>
+                                        <p className="text-[10px] mt-1 truncate">
+                                            <span className={`${task.source === 'manual' ? 'text-orange-500/70' : 'text-slate-500'}`}>
+                                                {task.source === 'manual' ? '✎ ידני' : task.incidentName}
+                                            </span>
+                                        </p>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const ScheduleAlertModal = ({ alert, onDismiss }) => {
+            if (!alert) return null;
+            return (
+                <div className="fixed inset-0 bg-black/85 flex items-center justify-center z-[60] p-4">
+                    <div className="alert-glow bg-slate-900 border-2 border-orange-500 rounded-2xl p-8 w-full max-w-md shadow-2xl text-center">
+                        <div className="text-5xl mb-4">⏰</div>
+                        <p className="text-[11px] font-black text-orange-400 uppercase tracking-widest mb-1">התראת זמן</p>
+                        <p className="text-5xl font-mono font-black text-white mb-5">{alert.time}</p>
+                        <p className="text-base text-slate-100 font-semibold mb-2 leading-snug">{alert.text}</p>
+                        <p className="text-sm text-slate-400 mb-7">אירוע: {alert.incidentName}</p>
+                        <button onClick={onDismiss}
+                            className="bg-orange-600 hover:bg-orange-500 px-8 py-3 rounded-xl font-black text-lg w-full transition-colors">
+                            קיבלתי ✓
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // ---------- Main App ----------
+
+        const App = () => {
+            const [view, setView] = useState('import');
+            const [rawInput, setRawInput] = useState('');
+            const [state, setState] = useState({ prefix: '', suffix: '', incidents: [], generalTasks: [], generalTasksHeaderLine: null, generalTasksTrailingLines: [], manualScheduledTasks: [] });
+            const [showAdd, setShowAdd] = useState(false);
+            const [showOutput, setShowOutput] = useState(false);
+            const [currentAlert, setCurrentAlert] = useState(null);
+            const alertedIds = useRef(new Set());
+            const stateRef = useRef(state);
+            useEffect(() => { stateRef.current = state; }, [state]);
+
+            useEffect(() => {
+                try {
+                    const saved = localStorage.getItem('magnus_incidents_v5');
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        if (parsed && parsed.incidents) {
+                            if (!parsed.generalTasks) parsed.generalTasks = [];
+                            if (!parsed.generalTasksHeaderLine) parsed.generalTasksHeaderLine = null;
+                            if (!parsed.generalTasksTrailingLines) parsed.generalTasksTrailingLines = [];
+                            if (!parsed.manualScheduledTasks) parsed.manualScheduledTasks = [];
+                        }
+                        if (parsed && parsed.incidents && parsed.incidents.length > 0) {
+                            setState(parsed);
+                            setView('dashboard');
+                        }
+                    }
+                } catch (e) {}
+            }, []);
+
+            useEffect(() => {
+                localStorage.setItem('magnus_incidents_v5', JSON.stringify(state));
+            }, [state]);
+
+            const playAlertSound = () => {
+                try {
+                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    const freqs = [880, 660, 880, 1100];
+                    freqs.forEach((f, i) => osc.frequency.setValueAtTime(f, ctx.currentTime + i * 0.12));
+                    gain.gain.setValueAtTime(0.35, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.55);
+                    osc.start(ctx.currentTime);
+                    osc.stop(ctx.currentTime + 0.55);
+                } catch(e) {}
+            };
+
+            useEffect(() => {
+                const check = () => {
+                    const now = new Date();
+                    const todayStr = getDateStr(now);
+                    const t = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+                    const scheduled = getScheduledTasks(stateRef.current);
+                    for (const task of scheduled) {
+                        if (task.date === todayStr && task.time === t && !alertedIds.current.has(task.taskId)) {
+                            alertedIds.current.add(task.taskId);
+                            playAlertSound();
+                            setCurrentAlert(task);
+                            break;
+                        }
+                    }
+                };
+                check();
+                const interval = setInterval(check, 30000);
+                return () => clearInterval(interval);
+            }, []);
+
+            const handleImport = () => {
+                const parsed = parseProtocol(rawInput);
+                if (!parsed.incidents.length) {
+                    alert('לא זוהו אירועים. ודא ששורת הכותרת בפורמט: *שם | סוג | מיקום*');
+                    return;
+                }
+                setState(parsed);
+                setView('dashboard');
+            };
+
+            const handleNLP = (incId, text) => {
+                let resultRef = { type: 'detail', text };
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const openTasks = inc.tasks.filter(t => !t.done);
+                        const matched = detectTaskCompletion(text, openTasks);
+                        if (matched) {
+                            resultRef = { type: 'task-done', taskId: matched.id, taskText: matched.text };
+                            return { ...inc, tasks: inc.tasks.map(t => t.id === matched.id ? { ...t, done: true } : t) };
+                        }
+                        const newIdx = inc.detailLines.length;
+                        return {
+                            ...inc,
+                            detailLines: [...inc.detailLines, text],
+                            newDetailIds: [...(inc.newDetailIds || []), newIdx],
+                        };
+                    })
+                }));
+                return resultRef;
+            };
+
+            const handleAddUpdate = (incId, text) => {
+                const now = new Date();
+                const ts = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+                const timestamped = `[${ts}] ${text}`;
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const newIdx = inc.detailLines.length;
+                        return {
+                            ...inc,
+                            detailLines: [...inc.detailLines, timestamped],
+                            newDetailIds: [...(inc.newDetailIds || []), newIdx],
+                        };
+                    })
+                }));
+            };
+
+            const handleAddTask = (incId, text, scheduledDate = null, scheduledTime = null) => {
+                const isScheduled = !!(scheduledDate && scheduledTime);
+                const rawSuffix = isScheduled ? ` [${fmtDate(scheduledDate)} ${scheduledTime}]` : '';
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const newTask = {
+                            id: rid(),
+                            rawLine: `• ${text}${rawSuffix}`,
+                            text,
+                            done: false,
+                            ...(isScheduled ? { scheduledDate, scheduledTime } : {}),
+                        };
+                        return {
+                            ...inc,
+                            tasks: [...inc.tasks, newTask],
+                            tasksHeaderLine: inc.tasksHeaderLine || 'משימות:',
+                        };
+                    })
+                }));
+            };
+
+            const toggleTask = (incId, taskId) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc =>
+                        inc.id === incId
+                            ? { ...inc, tasks: inc.tasks.map(t => t.id === taskId ? { ...t, done: !t.done } : t) }
+                            : inc
+                    )
+                }));
+            };
+
+            const editDetailLine = (incId, lineIdx, newText) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const newLines = [...inc.detailLines];
+                        newLines[lineIdx] = newText;
+                        return { ...inc, detailLines: newLines };
+                    })
+                }));
+            };
+
+            const editTask = (incId, taskId, newText) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        return {
+                            ...inc,
+                            tasks: inc.tasks.map(t =>
+                                t.id === taskId
+                                    ? { ...t, text: newText, rawLine: `• ${newText}` }
+                                    : t
+                            )
+                        };
+                    })
+                }));
+            };
+
+            const deleteTask = (incId, taskId) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc =>
+                        inc.id === incId
+                            ? { ...inc, tasks: inc.tasks.filter(t => t.id !== taskId) }
+                            : inc
+                    )
+                }));
+            };
+
+            const deleteDetailLine = (incId, lineIdx) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const newLines = inc.detailLines.filter((_, i) => i !== lineIdx);
+                        const newNewDetailIds = (inc.newDetailIds || [])
+                            .filter(id => id !== lineIdx)
+                            .map(id => id > lineIdx ? id - 1 : id);
+                        return { ...inc, detailLines: newLines, newDetailIds: newNewDetailIds };
+                    })
+                }));
+            };
+
+            const closeIncident = (incId) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => inc.id === incId ? { ...inc, closed: true } : inc)
+                }));
+            };
+
+            const toggleGeneralTask = (taskId) => {
+                setState(prev => ({
+                    ...prev,
+                    generalTasks: (prev.generalTasks || []).map(t =>
+                        t.id === taskId ? { ...t, done: !t.done } : t
+                    )
+                }));
+            };
+
+            const addGeneralTask = (text) => {
+                setState(prev => ({
+                    ...prev,
+                    generalTasks: [...(prev.generalTasks || []), { id: rid(), rawLine: `• ${text}`, text, done: false }],
+                    generalTasksHeaderLine: prev.generalTasksHeaderLine || 'משימות כללי:',
+                }));
+            };
+
+            const editGeneralTask = (taskId, newText) => {
+                setState(prev => ({
+                    ...prev,
+                    generalTasks: (prev.generalTasks || []).map(t =>
+                        t.id === taskId ? { ...t, text: newText, rawLine: `• ${newText}` } : t
+                    )
+                }));
+            };
+
+            const deleteGeneralTask = (taskId) => {
+                setState(prev => ({
+                    ...prev,
+                    generalTasks: (prev.generalTasks || []).filter(t => t.id !== taskId)
+                }));
+            };
+
+            const addManualScheduledTask = ({ date, time, text }) => {
+                setState(prev => ({
+                    ...prev,
+                    manualScheduledTasks: [...(prev.manualScheduledTasks || []), { id: rid(), date: date || getDateStr(), time, text }],
+                }));
+            };
+
+            const removeManualScheduledTask = (id) => {
+                setState(prev => ({
+                    ...prev,
+                    manualScheduledTasks: (prev.manualScheduledTasks || []).filter(t => t.id !== id),
+                }));
+            };
+
+            const addIncident = (data) => {
+                const newInc = {
+                    id: rid(),
+                    rawHeader: `*${data.name} | ${data.type} | ${data.location} *`,
+                    name: data.name,
+                    type: data.type,
+                    location: data.location,
+                    detailLines: data.details ? data.details.split('\n') : [],
+                    newDetailIds: [],
+                    tasksHeaderLine: data.tasks && data.tasks.trim() ? 'משימות:' : null,
+                    tasks: (data.tasks || '').split('\n').filter(l => l.trim()).map(l => ({
+                        id: rid(),
+                        rawLine: /^\s*[•\-]/.test(l) ? l : `•⁠  ⁠${l.trim()}`,
+                        text: l.replace(/^[\s•\-⁠\u2060\u2063]+/, '').trim(),
+                        done: false,
+                    })),
+                    trailingLines: [],
+                    closed: false,
+                };
+
+                setState(prev => {
+                    let next = { ...prev, incidents: [...prev.incidents, newInc] };
+                    if (!next.prefix && !next.suffix && next.incidents.length === 1) {
+                        next.prefix = '[סטטוס אירועים פתוחים';
+                        next.suffix = ']';
+                    }
+                    return next;
+                });
+                setShowAdd(false);
+            };
+
+            const resetAll = () => {
+                if (window.confirm('לאפס את כל הנתונים?')) {
+                    setState({ prefix: '', suffix: '', incidents: [], generalTasks: [], generalTasksHeaderLine: null, generalTasksTrailingLines: [] });
+                    setRawInput('');
+                    setView('import');
+                }
+            };
+
+            const output = useMemo(() => generateProtocol(state), [state]);
+            const activeIncidents = state.incidents.filter(i => !i.closed);
+            const closedCount = state.incidents.length - activeIncidents.length;
+
+            return (
+                <div className="min-h-screen flex flex-col">
+                    <header className="bg-slate-900 border-b border-slate-800 p-4 sticky top-0 z-40 shadow-xl">
+                        <div className="max-w-6xl mx-auto flex justify-between items-center gap-3 flex-wrap">
+                            <h1 className="font-bold text-xl flex items-center gap-2">
+                                <span className="text-sky-500">MAGNUS</span>
+                                <span className="text-slate-500 text-xs font-normal">ניהול אירועים חכם</span>
+                            </h1>
+                            <div className="flex items-center gap-2">
+                                <nav className="flex bg-slate-800 p-1 rounded-xl">
+                                    {[['import','ייבוא'],['dashboard','לוח בקרה']].map(([key,label]) => (
+                                        <button key={key} onClick={() => setView(key)}
+                                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${view === key ? 'bg-sky-600 shadow' : 'text-slate-400 hover:text-white'}`}>
+                                            {label}
+                                        </button>
+                                    ))}
+                                </nav>
+                                {state.incidents.length > 0 && (
+                                    <button onClick={resetAll} className="text-[11px] text-slate-500 hover:text-red-400 px-2 py-1">אפס</button>
+                                )}
+                            </div>
+                        </div>
+                    </header>
+
+                    <main className="flex-1 p-5 max-w-6xl mx-auto w-full">
+                        {view === 'import' && (
+                            <div className="bg-slate-900 p-6 md:p-8 rounded-2xl border border-slate-800 shadow-2xl">
+                                <h2 className="text-xl font-bold mb-2 text-sky-400">ייבוא העברת משמרת</h2>
+                                <p className="text-xs text-slate-500 mb-4">הדבק את הטקסט הגולמי של סטטוס האירועים הפתוחים. המבנה יישמר במדויק בפלט הסופי.</p>
+                                <textarea
+                                    className="w-full h-96 bg-slate-950 border border-slate-700 rounded-xl p-5 font-mono text-sm mb-4 outline-none focus:border-sky-500"
+                                    placeholder="[סטטוס אירועים פתוחים&#10;*שם | סוג | מיקום *&#10;פרטים...&#10;משימות:&#10;• משימה 1&#10;]&#10;משימות כללי:&#10;• משימה כללית 1"
+                                    value={rawInput}
+                                    onChange={e => setRawInput(e.target.value)}/>
+                                <button onClick={handleImport}
+                                    className="w-full bg-sky-600 hover:bg-sky-500 py-4 rounded-xl font-bold text-base">
+                                    נתח וטען לוח בקרה
+                                </button>
+                            </div>
+                        )}
+
+                        {view === 'dashboard' && (
+                            <div>
+                                <div className="flex justify-between items-center mb-5 flex-wrap gap-2">
+                                    <div>
+                                        <p className="text-[11px] text-slate-500 uppercase font-bold tracking-widest">אירועים פעילים</p>
+                                        <h2 className="text-2xl font-bold">{activeIncidents.length} פתוחים {closedCount > 0 && <span className="text-sm font-normal text-slate-500">· {closedCount} נסגרו</span>}</h2>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => setShowAdd(true)}
+                                            className="bg-sky-600 hover:bg-sky-500 px-4 py-2.5 rounded-xl font-bold text-sm">
+                                            + הוסף אירוע חדש
+                                        </button>
+                                        <button onClick={() => setShowOutput(true)}
+                                            className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2.5 rounded-xl font-bold text-sm">
+                                            הפק פלט סופי
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {(() => {
+                                    const scheduledTasks = getScheduledTasks(state);
+                                    return (
+                                        <div className="flex gap-5 items-start">
+                                            <div className="flex-1 min-w-0">
+                                                {activeIncidents.length === 0 ? (
+                                                    <div className="bg-slate-900 border border-dashed border-slate-800 rounded-2xl p-10 text-center">
+                                                        <p className="text-slate-500 mb-4">אין אירועים פעילים</p>
+                                                        <button onClick={() => setShowAdd(true)}
+                                                            className="bg-sky-600 hover:bg-sky-500 px-5 py-2.5 rounded-xl font-bold text-sm">
+                                                            הוסף אירוע חדש
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                                        {activeIncidents.map(inc => (
+                                                            <IncidentCard
+                                                                key={inc.id}
+                                                                incident={inc}
+                                                                onAddUpdate={handleAddUpdate}
+                                                                onAddTask={handleAddTask}
+                                                                onToggleTask={toggleTask}
+                                                                onClose={closeIncident}
+                                                                onEditDetailLine={editDetailLine}
+                                                                onEditTask={editTask}
+                                                                onDeleteDetailLine={deleteDetailLine}
+                                                                onDeleteTask={deleteTask}/>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="w-64 shrink-0 flex flex-col gap-4 self-start sticky top-24 max-h-[calc(100vh-120px)] overflow-y-auto scroll-thin">
+                                                <ScheduledTasksSidebar
+                                                    scheduledTasks={scheduledTasks}
+                                                    onAddManual={addManualScheduledTask}
+                                                    onRemoveManual={removeManualScheduledTask}
+                                                    incidents={activeIncidents}
+                                                    onAddIncidentTask={handleAddTask}
+                                                />
+                                                <GeneralTasksPanel
+                                                    tasks={state.generalTasks}
+                                                    onToggleTask={toggleGeneralTask}
+                                                    onEditTask={editGeneralTask}
+                                                    onDeleteTask={deleteGeneralTask}
+                                                    onAddTask={addGeneralTask}
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
+
+                                {(() => {
+                                    const closedIncidents = state.incidents.filter(i => i.closed);
+                                    if (!closedIncidents.length) return null;
+                                    return (
+                                        <div className="mt-8">
+                                            <div className="flex items-center gap-3 mb-4">
+                                                <div className="flex-1 h-px bg-slate-800"></div>
+                                                <p className="text-[11px] font-bold text-slate-600 uppercase tracking-widest shrink-0">אירועים סגורים ({closedIncidents.length})</p>
+                                                <div className="flex-1 h-px bg-slate-800"></div>
+                                            </div>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                                {closedIncidents.map(inc => (
+                                                    <ClosedIncidentCard key={inc.id} incident={inc} />
+                                                ))}
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
+                            </div>
+                        )}
+                    </main>
+
+                    {showAdd && <AddIncidentModal onClose={() => setShowAdd(false)} onAdd={addIncident}/>}
+                    {showOutput && <OutputModal text={output} onClose={() => setShowOutput(false)}/>}
+                    <ScheduleAlertModal alert={currentAlert} onDismiss={() => setCurrentAlert(null)}/>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

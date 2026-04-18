@@ -1,0 +1,1973 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Magnus - ניהול חכם של אירועים</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700;800;900&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="protocols_kb.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        mn: {
+                            950: '#080808',
+                            900: '#0E0E0E',
+                            800: '#161616',
+                            700: '#1E1E1E',
+                            600: '#2A2A2A',
+                            500: '#363636',
+                            gold:  '#E8820C',
+                            goldh: '#F59520',
+                            goldd: '#C46A08',
+                            t:   '#F0F0F0',
+                            tm:  '#9A9A9A',
+                            td:  '#555555',
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Heebo', 'system-ui', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Heebo', system-ui, -apple-system, sans-serif; background-color: #0E0E0E; color: #F0F0F0; }
+        .incident-card { transition: all 0.3s ease; }
+        .incident-card.closed-anim { opacity: 0; transform: scale(0.95); }
+        .incident-card.closed-event { opacity: 0.5; filter: grayscale(50%); }
+        .incident-card.closed-event:hover { opacity: 0.65; filter: grayscale(30%); }
+        .line-new { background: rgba(232,130,12,0.1); border-right: 2px solid #E8820C; }
+        .task-fade { animation: fadeOut 0.4s forwards; }
+        @keyframes fadeOut { to { opacity: 0; transform: translateX(10px); } }
+        @keyframes pulse-red { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .blink-red { animation: pulse-red 2s infinite; }
+        @keyframes alert-glow { 0%, 100% { box-shadow: 0 0 20px rgba(232,130,12,0.5); } 50% { box-shadow: 0 0 70px rgba(232,130,12,1); } }
+        .alert-glow { animation: alert-glow 0.9s infinite; }
+        .scroll-thin::-webkit-scrollbar { width: 6px; }
+        .scroll-thin::-webkit-scrollbar-thumb { background: #2A2A2A; border-radius: 3px; }
+        details > summary { list-style: none; cursor: pointer; }
+        details > summary::-webkit-details-marker { display: none; }
+        /* SuperMagnus Chat */
+        .sm-panel { transition: transform 0.35s cubic-bezier(.2,.8,.2,1); will-change: transform; }
+        .sm-panel.closed { transform: translateX(-110%); }
+        .sm-backdrop { transition: opacity 0.3s ease; }
+        .sm-fab { transition: transform 0.2s ease, box-shadow 0.2s ease; box-shadow: 0 10px 30px rgba(232,130,12,0.4); }
+        .sm-fab:hover { transform: translateY(-2px); box-shadow: 0 14px 36px rgba(232,130,12,0.6); }
+        .sm-msg-bubble { animation: sm-in 0.22s ease-out; }
+        @keyframes sm-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+        .sm-typing span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #E8820C; margin: 0 2px; animation: sm-dot 1s infinite ease-in-out; }
+        .sm-typing span:nth-child(2) { animation-delay: 0.15s; }
+        .sm-typing span:nth-child(3) { animation-delay: 0.3s; }
+        @keyframes sm-dot { 0%,80%,100% { transform: scale(0.5); opacity: 0.4; } 40% { transform: scale(1); opacity: 1; } }
+        /* Magnus brand header style */
+        .magnus-header { border-bottom: 1px solid #222; }
+        .magnus-header::before { content: ''; display: block; height: 3px; background: #E8820C; }
+        /* Card hover glow */
+        .incident-card:hover { box-shadow: 0 0 0 1px rgba(232,130,12,0.3), 0 8px 32px rgba(0,0,0,0.6); }
+        /* Input focus ring */
+        input:focus, textarea:focus { box-shadow: 0 0 0 2px rgba(232,130,12,0.25); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // ---------- Parser & Generator (preserve exact structure) ----------
+
+        // Matches: [Name | Type | Location, *Name | Type | Location *, Name | Type | Location
+        const EVENT_RE = /^\s*[\[*]?\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*[*]?\s*$/;
+        const TASK_RE = /^\s*(?:[•\-])/;
+        const TASKS_HEADER_RE = /^\s*משימות\s*:/;
+        const GENERAL_TASKS_HEADER_RE = /^\s*משימות\s*כללי\s*:/;
+
+        const rid = () => Math.random().toString(36).slice(2, 10);
+
+        // Detects valid 24-hour times (00:00–23:59) in task text
+        const TIME_RE = /\b((?:[01]?\d|2[0-3]):[0-5]\d)\b/;
+        const normalizeTime = t => { const [h, m] = t.split(':'); return `${h.padStart(2,'0')}:${m}`; };
+
+        const getTodayStr = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; };
+        const getTomorrowStr = () => { const n = new Date(); n.setDate(n.getDate()+1); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; };
+        const getCurrentTimeStr = () => { const n = new Date(); return `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`; };
+
+        const resolveTaskDate = (time, text, explicitDate) => {
+            if (explicitDate) return explicitDate;
+            const hasMachar = /מחר/.test(text);
+            if (hasMachar || time <= getCurrentTimeStr()) return getTomorrowStr();
+            return getTodayStr();
+        };
+
+        const getScheduledTasks = (state) => {
+            const result = [];
+            const activeIncs = (state.incidents || []).filter(i => !i.closed);
+            for (const inc of activeIncs) {
+                for (const task of inc.tasks.filter(t => !t.done)) {
+                    let time = task.scheduledTime ? normalizeTime(task.scheduledTime) : null;
+                    if (!time) { const m = task.text.match(TIME_RE); if (m) time = normalizeTime(m[1]); }
+                    if (!time) continue;
+                    const date = resolveTaskDate(time, task.text, task.scheduledDate || null);
+                    result.push({ taskId: task.id, incidentId: inc.id, incidentName: inc.name, time, date, text: task.text, source: 'incident' });
+                }
+            }
+            for (const task of (state.generalTasks || []).filter(t => !t.done)) {
+                let time = task.scheduledTime ? normalizeTime(task.scheduledTime) : null;
+                if (!time) { const m = task.text.match(TIME_RE); if (m) time = normalizeTime(m[1]); }
+                if (!time) continue;
+                const date = resolveTaskDate(time, task.text, task.scheduledDate || null);
+                result.push({ taskId: task.id, incidentId: null, incidentName: 'משימות כלליות', time, date, text: task.text, source: 'general' });
+            }
+            for (const task of (state.manualScheduledTasks || [])) {
+                const date = task.date || resolveTaskDate(task.time, task.text || '', null);
+                result.push({ taskId: task.id, incidentId: null, incidentName: 'ידני', time: task.time, date, text: task.text, source: 'manual' });
+            }
+            result.sort((a, b) => {
+                const dc = (a.date || '').localeCompare(b.date || '');
+                if (dc !== 0) return dc;
+                const [ah, am] = a.time.split(':').map(Number);
+                const [bh, bm] = b.time.split(':').map(Number);
+                return (ah * 60 + am) - (bh * 60 + bm);
+            });
+            return result;
+        };
+
+        const parseProtocol = (raw) => {
+            const state = { prefix: '', suffix: '', incidents: [] };
+            if (!raw || !raw.trim()) return state;
+
+            // Pre-pass: extract general tasks section from anywhere in the input
+            let genHeader = null;
+            let genTasks = [];
+            let genTrailing = [];
+            let inGen = false;
+            const remainingLines = [];
+            for (const line of raw.split('\n')) {
+                const t = line.trim();
+                if (GENERAL_TASKS_HEADER_RE.test(t)) {
+                    genHeader = line;
+                    inGen = true;
+                } else if (inGen && TASK_RE.test(t)) {
+                    genTasks.push({
+                        id: rid(),
+                        rawLine: line,
+                        text: t.replace(/^[•\-]\s*/, '').replace(/^[\s\u2060\u2063⁠]+/, '').trim(),
+                        done: false,
+                    });
+                } else if (inGen && t === '') {
+                    genTrailing.push(line);
+                } else {
+                    if (inGen && t !== '') inGen = false;
+                    remainingLines.push(line);
+                }
+            }
+            state.generalTasksHeaderLine = genHeader;
+            state.generalTasks = genTasks;
+            state.generalTasksTrailingLines = genTrailing;
+
+            // Main pass: parse events from the remaining lines
+            let prefixLines = [];
+            let suffixLines = [];
+            let current = null;
+            let section = 'details';
+            let phase = 'prefix';
+
+            const flush = () => { if (current) state.incidents.push(current); current = null; };
+
+            for (const line of remainingLines) {
+                const trimmed = line.trim();
+                const m = trimmed.match(EVENT_RE);
+
+                if (m) {
+                    flush();
+                    phase = 'events';
+                    current = {
+                        id: rid(),
+                        rawHeader: line,
+                        name: m[1].trim(),
+                        type: m[2].trim(),
+                        location: m[3].trim(),
+                        detailLines: [],
+                        newDetailIds: [],
+                        tasksHeaderLine: null,
+                        tasks: [],
+                        trailingLines: [],
+                        closed: false,
+                    };
+                    section = 'details';
+                    continue;
+                }
+
+                if (phase === 'prefix') { prefixLines.push(line); continue; }
+
+                if (phase === 'events' && trimmed.startsWith(']')) {
+                    flush();
+                    phase = 'suffix';
+                    suffixLines.push(line);
+                    continue;
+                }
+                if (phase === 'suffix') { suffixLines.push(line); continue; }
+
+                if (!current) continue;
+
+                if (TASKS_HEADER_RE.test(trimmed)) {
+                    current.tasksHeaderLine = line;
+                    section = 'tasks';
+                    continue;
+                }
+
+                if (section === 'tasks') {
+                    if (TASK_RE.test(trimmed)) {
+                        current.tasks.push({
+                            id: rid(),
+                            rawLine: line,
+                            text: trimmed.replace(/^[•\-]\s*/, '').replace(/^[\s\u2060\u2063⁠]+/, '').trim(),
+                            done: false,
+                        });
+                    } else if (trimmed === '') {
+                        current.trailingLines.push(line);
+                    } else if (current.tasks.length > 0) {
+                        const last = current.tasks[current.tasks.length - 1];
+                        last.rawLine = last.rawLine + '\n' + line;
+                        last.text = (last.text + ' ' + trimmed).trim();
+                    } else {
+                        current.trailingLines.push(line);
+                    }
+                } else {
+                    current.detailLines.push(line);
+                }
+            }
+            flush();
+            state.prefix = prefixLines.join('\n');
+            state.suffix = suffixLines.join('\n');
+            return state;
+        };
+
+        const generateProtocol = (state) => {
+            const parts = [];
+            if (state.prefix !== '') parts.push(state.prefix);
+
+            const openIncidents = state.incidents.filter(i => !i.closed);
+            openIncidents.forEach(inc => {
+                parts.push(inc.rawHeader);
+                if (inc.detailLines.length) parts.push(inc.detailLines.join('\n'));
+                const openTasks = inc.tasks.filter(t => !t.done);
+                if (inc.tasksHeaderLine !== null) {
+                    parts.push(inc.tasksHeaderLine);
+                    openTasks.forEach(t => parts.push(t.rawLine));
+                    if (inc.trailingLines.length) parts.push(inc.trailingLines.join('\n'));
+                } else if (openTasks.length > 0) {
+                    parts.push('משימות:');
+                    openTasks.forEach(t => parts.push(t.rawLine));
+                }
+            });
+
+            if (state.suffix !== '') parts.push(state.suffix);
+
+            const openGenTasks = (state.generalTasks || []).filter(t => !t.done);
+            if (openGenTasks.length > 0) {
+                parts.push(state.generalTasksHeaderLine || 'משימות כללי:');
+                openGenTasks.forEach(t => parts.push(t.rawLine));
+                if (state.generalTasksTrailingLines && state.generalTasksTrailingLines.length)
+                    parts.push(state.generalTasksTrailingLines.join('\n'));
+            }
+
+            return parts.join('\n');
+        };
+
+        // ---------- NLP: detect task completion ----------
+
+        const DONE_RE = /\b(done|closed|complete[d]?|fixed)\b|בוצע(ה|ו)?|הסתיים(ה|ו)?|הושלם(ה|ו)?|טופל(ה|ו)?|נסגר(ה|ו)?|סיימנו|סיימתי|סומן(ה|ו)?\s*(כ)?בוצע/i;
+
+        const tokenize = (s) => (s || '')
+            .replace(/[.,:;!?"'״׳()\[\]]/g, ' ')
+            .split(/\s+/)
+            .filter(w => w.length >= 2);
+
+        const detectTaskCompletion = (input, openTasks) => {
+            if (!openTasks.length) return null;
+            if (!DONE_RE.test(input)) return null;
+
+            const cleaned = input.replace(DONE_RE, ' ').trim();
+            const inputTokens = tokenize(cleaned);
+
+            let best = null;
+            let bestScore = 0;
+
+            for (const task of openTasks) {
+                const taskTokens = tokenize(task.text);
+                if (!taskTokens.length) continue;
+                let matches = 0;
+                for (const it of inputTokens) {
+                    if (taskTokens.some(tt => tt === it || tt.includes(it) || it.includes(tt))) matches++;
+                }
+                const score = matches / Math.max(taskTokens.length, 1);
+                if (score > bestScore) { bestScore = score; best = task; }
+            }
+
+            // if no content beyond the "done" keyword and only one open task → mark it
+            if (!inputTokens.length && openTasks.length === 1) return openTasks[0];
+            if (bestScore >= 0.25) return best;
+            return null;
+        };
+
+        // ---------- Components ----------
+
+        const AddIncidentModal = ({ onClose, onAdd }) => {
+            const [name, setName] = useState('');
+            const [type, setType] = useState('');
+            const [location, setLocation] = useState('');
+            const [details, setDetails] = useState('');
+            const [tasks, setTasks] = useState('');
+
+            const submit = () => {
+                if (!name.trim() || !type.trim() || !location.trim()) return;
+                onAdd({ name: name.trim(), type: type.trim(), location: location.trim(), details, tasks });
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-mn-800 border border-mn-600 rounded p-6 w-full max-w-lg shadow-2xl" onClick={e => e.stopPropagation()}>
+                        <h3 className="text-lg font-black mb-4 text-mn-gold uppercase tracking-wider">הוספת אירוע חדש</h3>
+                        <div className="space-y-3">
+                            <input value={name} onChange={e => setName(e.target.value)} placeholder="שם"
+                                className="w-full bg-mn-950 border border-mn-700 rounded px-3 py-2 text-sm outline-none focus:border-mn-gold text-mn-t placeholder:text-mn-td"/>
+                            <input value={type} onChange={e => setType(e.target.value)} placeholder="סוג פעולה (למשל: חילוץ)"
+                                className="w-full bg-mn-950 border border-mn-700 rounded px-3 py-2 text-sm outline-none focus:border-mn-gold text-mn-t placeholder:text-mn-td"/>
+                            <input value={location} onChange={e => setLocation(e.target.value)} placeholder="מיקום"
+                                className="w-full bg-mn-950 border border-mn-700 rounded px-3 py-2 text-sm outline-none focus:border-mn-gold text-mn-t placeholder:text-mn-td"/>
+                            <textarea value={details} onChange={e => setDetails(e.target.value)} placeholder="פרטים (שורה אחר שורה)"
+                                rows="5"
+                                className="w-full bg-mn-950 border border-mn-700 rounded px-3 py-2 text-sm outline-none focus:border-mn-gold text-mn-t placeholder:text-mn-td"/>
+                            <textarea value={tasks} onChange={e => setTasks(e.target.value)} placeholder="משימות (שורה אחר שורה)"
+                                rows="3"
+                                className="w-full bg-mn-950 border border-mn-700 rounded px-3 py-2 text-sm outline-none focus:border-mn-gold text-mn-t placeholder:text-mn-td"/>
+                        </div>
+                        <div className="flex gap-2 mt-5">
+                            <button onClick={submit} className="flex-1 bg-mn-gold hover:bg-mn-goldh text-mn-950 py-2.5 rounded font-black uppercase tracking-wider">הוסף</button>
+                            <button onClick={onClose} className="px-4 bg-mn-700 hover:bg-mn-600 text-mn-t py-2.5 rounded">ביטול</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const OutputModal = ({ text, onClose }) => {
+            const [copied, setCopied] = useState(false);
+            const copy = () => {
+                navigator.clipboard.writeText(text);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+            };
+            return (
+                <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-mn-800 border border-mn-600 rounded p-6 w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-bold text-emerald-400">פלט סופי</h3>
+                            <button onClick={onClose} className="text-mn-tm hover:text-white text-2xl leading-none">×</button>
+                        </div>
+                        <pre className="bg-mn-950 border border-mn-700 rounded p-5 font-mono text-sm whitespace-pre-wrap text-mn-t flex-1 overflow-auto scroll-thin">{text}</pre>
+                        <button onClick={copy} className={`mt-4 py-3 rounded font-bold uppercase tracking-wider transition-colors ${copied ? 'bg-emerald-500' : 'bg-emerald-600 hover:bg-emerald-500'}`}>
+                            {copied ? 'הועתק ✓' : 'העתק ללוח'}
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        const GeneralTasksPanel = ({ tasks, onToggleTask }) => {
+            const [inputVal, setInputVal] = useState('');
+            const [flash, setFlash] = useState(null);
+            const [fadingIds, setFadingIds] = useState([]);
+
+            const openTasks = (tasks || []).filter(t => !t.done);
+
+            const handleSubmit = () => {
+                const text = inputVal.trim();
+                if (!text) return;
+                const matched = detectTaskCompletion(text, openTasks);
+                setInputVal('');
+                if (matched) {
+                    setFadingIds(prev => [...prev, matched.id]);
+                    setFlash(matched.text);
+                    setTimeout(() => onToggleTask(matched.id), 300);
+                    setTimeout(() => setFlash(null), 2000);
+                }
+            };
+
+            return (
+                <div className="w-64 bg-mn-800 border border-mn-600 rounded p-4" style={{borderRightWidth:'4px',borderRightColor:'#E8820C'}}>
+                    <p className="text-[11px] font-bold text-amber-500 uppercase tracking-widest mb-3">
+                        משימות כלליות ({openTasks.length})
+                    </p>
+                    {openTasks.length === 0 ? (
+                        <p className="text-xs text-mn-td italic">אין משימות כלליות</p>
+                    ) : (
+                        <>
+                            <div className="flex flex-col gap-y-1.5 mb-3">
+                                {openTasks.map(t => (
+                                    <label key={t.id} className={`flex items-start gap-2 cursor-pointer group ${fadingIds.includes(t.id) ? 'task-fade' : ''}`}>
+                                        <input type="checkbox" checked={false}
+                                            onChange={() => {
+                                                setFadingIds(prev => [...prev, t.id]);
+                                                setTimeout(() => onToggleTask(t.id), 300);
+                                            }}
+                                            className="mt-0.5 rounded bg-mn-700 border-mn-600 text-amber-500"/>
+                                        <span className="text-xs text-mn-t group-hover:text-white leading-snug">{t.text}</span>
+                                    </label>
+                                ))}
+                            </div>
+                            <div className="pt-2 border-t border-mn-600">
+                                <input
+                                    type="text"
+                                    value={inputVal}
+                                    onChange={e => setInputVal(e.target.value)}
+                                    onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); }}
+                                    placeholder='סמן משימה כבוצעה...'
+                                    className="w-full bg-mn-950 border border-mn-700 rounded px-3 py-2 text-xs focus:border-amber-500 outline-none text-mn-t placeholder:text-mn-td"
+                                />
+                                {flash && (
+                                    <div className="mt-2 text-[11px] px-2 py-1 rounded bg-amber-900/50 text-amber-300">
+                                        ✓ משימה סומנה כבוצעה: {flash}
+                                    </div>
+                                )}
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+        };
+
+        const IncidentCard = ({ incident, onAddUpdate, onAddTask, onToggleTask, onClose, onEditDetailLine, onEditTask, onDeleteDetailLine, onDeleteTask }) => {
+            const [flash, setFlash] = useState(null);
+            const [updateVal, setUpdateVal] = useState('');
+            const [taskVal, setTaskVal] = useState('');
+            const [taskDate, setTaskDate] = useState('');
+            const [taskTime, setTaskTime] = useState('');
+            const [fadingTaskIds, setFadingTaskIds] = useState([]);
+            const [editingDetail, setEditingDetail] = useState(null);
+            const [editingTask, setEditingTask] = useState(null);
+
+            const openTasks = incident.tasks.filter(t => !t.done);
+            const doneTasks = incident.tasks.filter(t => t.done);
+
+            const handleAddUpdate = () => {
+                const text = updateVal.trim();
+                if (!text) return;
+                onAddUpdate(incident.id, text);
+                setUpdateVal('');
+                setFlash({ type: 'detail', text });
+                setTimeout(() => setFlash(null), 2000);
+            };
+
+            const handleAddTask = () => {
+                const text = taskVal.trim();
+                if (!text) return;
+                onAddTask(incident.id, text, taskDate || null, taskTime || null);
+                setTaskVal('');
+                setTaskDate('');
+                setTaskTime('');
+                const hasTime = taskTime || TIME_RE.test(text);
+                setFlash({ type: 'task-added', text, hasTime: !!hasTime });
+                setTimeout(() => setFlash(null), 2500);
+            };
+
+            const confirmClose = () => {
+                if (window.confirm(`לסגור את האירוע: ${incident.name}?`)) onClose(incident.id);
+            };
+
+            const commitDetailEdit = (idx, value) => {
+                if (value.trim()) onEditDetailLine(incident.id, idx, value);
+                setEditingDetail(null);
+            };
+
+            const commitTaskEdit = (id, value) => {
+                if (value.trim()) onEditTask(incident.id, id, value);
+                setEditingTask(null);
+            };
+
+            return (
+                <div className={`incident-card bg-mn-800 rounded p-5 shadow-2xl border border-mn-600 border-r-4 border-r-mn-gold ${incident.closed ? 'closed-event' : ''}`}>
+                    <div className="flex justify-between items-start mb-3 gap-2">
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                                <span className="text-[10px] font-black text-mn-gold uppercase tracking-widest">{incident.type}</span>
+                                {incident.closed && <span className="text-[9px] font-bold px-2 py-0.5 bg-mn-600/60 text-mn-td rounded uppercase tracking-widest">סגור</span>}
+                            </div>
+                            <h3 className="text-lg font-bold truncate text-mn-t">{incident.name}</h3>
+                            <p className="text-xs text-mn-td truncate">📍 {incident.location}</p>
+                        </div>
+                        {!incident.closed && <button onClick={confirmClose}
+                            className="text-xs px-2.5 py-1 bg-mn-700 hover:bg-red-600/80 text-mn-tm hover:text-white rounded-md font-bold shrink-0">
+                            סגור אירוע
+                        </button>}
+                    </div>
+
+                    <details className="mb-3 group" open>
+                        <summary className="text-[11px] font-bold text-mn-td uppercase tracking-wider mb-2 flex items-center gap-1">
+                            <span className="group-open:rotate-90 inline-block transition-transform">▸</span>
+                            פרטים ({incident.detailLines.length})
+                        </summary>
+                        <div className="bg-mn-950/60 border border-mn-700 rounded p-3 max-h-48 overflow-y-auto scroll-thin text-xs text-mn-t space-y-0.5">
+                            {incident.detailLines.length === 0 && <div className="text-mn-td italic">אין פרטים</div>}
+                            {incident.detailLines.map((line, i) => {
+                                const isNew = incident.newDetailIds && incident.newDetailIds.includes(i);
+                                const isEditing = editingDetail && editingDetail.idx === i;
+                                return (
+                                    <div key={i} className={`group/line px-1.5 py-0.5 rounded ${isNew ? 'line-new' : ''} flex items-start gap-1`}>
+                                        {isEditing ? (
+                                            <input
+                                                autoFocus
+                                                className="flex-1 w-full bg-mn-700 border border-mn-gold rounded px-1.5 py-0.5 font-mono outline-none text-mn-t"
+                                                value={editingDetail.value}
+                                                onChange={e => setEditingDetail({ idx: i, value: e.target.value })}
+                                                onKeyDown={e => {
+                                                    if (e.key === 'Enter') commitDetailEdit(i, editingDetail.value);
+                                                    else if (e.key === 'Escape') setEditingDetail(null);
+                                                }}
+                                                onBlur={() => commitDetailEdit(i, editingDetail.value)}
+                                            />
+                                        ) : (
+                                            <>
+                                                <span className="flex-1 whitespace-pre-wrap leading-relaxed">{line || '\u00A0'}</span>
+                                                <button
+                                                    onClick={() => setEditingDetail({ idx: i, value: line })}
+                                                    className="opacity-0 group-hover/line:opacity-100 text-mn-td hover:text-mn-gold leading-none shrink-0 transition-opacity"
+                                                    title="ערוך">✎</button>
+                                                <button
+                                                    onClick={() => onDeleteDetailLine(incident.id, i)}
+                                                    className="opacity-0 group-hover/line:opacity-100 text-mn-td hover:text-red-400 leading-none shrink-0 transition-opacity"
+                                                    title="מחק">✕</button>
+                                            </>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </details>
+
+                    {openTasks.length > 0 && (
+                        <div className="mb-3 pt-2 border-t border-mn-600">
+                            <p className="text-[11px] font-bold text-mn-td uppercase tracking-wider mb-2">משימות פתוחות ({openTasks.length})</p>
+                            <div className="space-y-1">
+                                {openTasks.map(t => {
+                                    const isEditingT = editingTask && editingTask.id === t.id;
+                                    return (
+                                        <div key={t.id} className={`group/task flex items-start gap-2 ${fadingTaskIds.includes(t.id) ? 'task-fade' : ''}`}>
+                                            {isEditingT ? (
+                                                <input
+                                                    autoFocus
+                                                    className="flex-1 bg-mn-700 border border-mn-gold rounded px-2 py-0.5 text-xs outline-none text-mn-t"
+                                                    value={editingTask.value}
+                                                    onChange={e => setEditingTask({ id: t.id, value: e.target.value })}
+                                                    onKeyDown={e => {
+                                                        if (e.key === 'Enter') commitTaskEdit(t.id, editingTask.value);
+                                                        else if (e.key === 'Escape') setEditingTask(null);
+                                                    }}
+                                                    onBlur={() => commitTaskEdit(t.id, editingTask.value)}
+                                                />
+                                            ) : (
+                                                <>
+                                                    <input type="checkbox" id={`task-${t.id}`} checked={false}
+                                                        onChange={() => {
+                                                            setFadingTaskIds(prev => [...prev, t.id]);
+                                                            setTimeout(() => onToggleTask(incident.id, t.id), 300);
+                                                        }}
+                                                        className="mt-0.5 rounded bg-mn-700 border-mn-600 text-mn-gold shrink-0"/>
+                                                    <label htmlFor={`task-${t.id}`} className="flex-1 text-xs text-mn-t group-hover/task:text-white leading-snug cursor-pointer">{t.text}</label>
+                                                    <button
+                                                        onClick={() => setEditingTask({ id: t.id, value: t.text })}
+                                                        className="opacity-0 group-hover/task:opacity-100 text-mn-td hover:text-mn-gold leading-none shrink-0 transition-opacity"
+                                                        title="ערוך משימה">✎</button>
+                                                    <button
+                                                        onClick={() => onDeleteTask(incident.id, t.id)}
+                                                        className="opacity-0 group-hover/task:opacity-100 text-mn-td hover:text-red-400 leading-none shrink-0 transition-opacity"
+                                                        title="מחק משימה">✕</button>
+                                                </>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
+                    {doneTasks.length > 0 && (
+                        <details className="mb-3 pt-2 border-t border-mn-600 group/hist">
+                            <summary className="text-[11px] font-bold text-mn-td uppercase tracking-wider cursor-pointer select-none hover:text-mn-tm flex items-center gap-1">
+                                <span className="group-open/hist:rotate-90 inline-block transition-transform">▸</span>
+                                משימות שהושלמו ({doneTasks.length})
+                            </summary>
+                            <div className="mt-2 space-y-1">
+                                {doneTasks.map(t => (
+                                    <div key={t.id} className="flex items-start gap-2">
+                                        <span className="text-emerald-500 text-xs mt-0.5 shrink-0">✓</span>
+                                        <span className="text-xs text-mn-td line-through leading-snug">{t.text}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </details>
+                    )}
+
+                    <div className="pt-2 border-t border-mn-600 space-y-2">
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={updateVal}
+                                onChange={e => setUpdateVal(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddUpdate(); }}
+                                placeholder="הוסף עדכון לביומן..."
+                                className="flex-1 bg-mn-950 border border-mn-700 rounded px-3 py-2 text-sm focus:border-mn-gold outline-none text-mn-t placeholder:text-mn-td"
+                            />
+                            <button
+                                onClick={handleAddUpdate}
+                                disabled={!updateVal.trim()}
+                                className="shrink-0 bg-mn-goldd hover:bg-mn-gold disabled:opacity-30 disabled:cursor-not-allowed px-3 py-2 rounded text-xs font-bold transition-colors text-mn-950">
+                                + עדכון
+                            </button>
+                        </div>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={taskVal}
+                                onChange={e => setTaskVal(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddTask(); }}
+                                placeholder="הוסף משימה (ניתן לכלול שעה, למשל 14:30)..."
+                                className="flex-1 bg-mn-950 border border-mn-700 rounded px-3 py-2 text-sm focus:border-emerald-500 outline-none text-mn-t placeholder:text-mn-td"
+                            />
+                            <button
+                                onClick={handleAddTask}
+                                disabled={!taskVal.trim()}
+                                className="shrink-0 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-30 disabled:cursor-not-allowed px-3 py-2 rounded text-xs font-bold transition-colors">
+                                + משימה
+                            </button>
+                        </div>
+                        <div className="flex gap-2 mt-1">
+                            <input
+                                type="date"
+                                dir="ltr"
+                                value={taskDate}
+                                onChange={e => setTaskDate(e.target.value)}
+                                className="flex-1 bg-mn-950 border border-mn-700 rounded px-2 py-1.5 text-xs focus:border-emerald-500 outline-none text-mn-t [color-scheme:dark]"
+                                title="תאריך (אופציונלי)"
+                            />
+                            <input
+                                type="time"
+                                dir="ltr"
+                                value={taskTime}
+                                onChange={e => setTaskTime(e.target.value)}
+                                className="flex-1 bg-mn-950 border border-mn-700 rounded px-2 py-1.5 text-xs focus:border-emerald-500 outline-none text-orange-300 font-mono [color-scheme:dark]"
+                                title="שעה (אופציונלי)"
+                            />
+                        </div>
+                        {flash && (
+                            <div className={`text-[11px] px-2 py-1 rounded ${
+                                flash.type === 'task-added'
+                                    ? (flash.hasTime ? 'bg-orange-900/50 text-orange-300' : 'bg-emerald-900/50 text-emerald-300')
+                                    : 'bg-mn-goldd/20 text-mn-gold'
+                            }`}>
+                                {flash.type === 'task-added'
+                                    ? (flash.hasTime ? `⏱ משימה מתוזמנת נוספה לסיידבר: ${flash.text}` : `✓ משימה נוספה לרשימה: ${flash.text}`)
+                                    : `+ עדכון נוסף לביומן`}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const ScheduledTasksSidebar = ({ scheduledTasks, onAddManual, onRemoveManual, incidents = [] }) => {
+            const [showForm, setShowForm] = useState(false);
+            const [newTime, setNewTime] = useState('');
+            const [newDate, setNewDate] = useState('');
+            const [newText, setNewText] = useState('');
+            const [selectedIncidentId, setSelectedIncidentId] = useState('');
+
+            const now = new Date();
+            const todayStr = getTodayStr();
+            const tomorrowStr = getTomorrowStr();
+            const currentTime = getCurrentTimeStr();
+
+            const submitManual = () => {
+                const t = newTime.trim();
+                const txt = newText.trim();
+                if (!t || !txt) return;
+                onAddManual({ time: t, text: txt, date: newDate || null, incidentId: selectedIncidentId || null });
+                setNewTime('');
+                setNewDate('');
+                setNewText('');
+                setSelectedIncidentId('');
+                setShowForm(false);
+            };
+
+            return (
+                <div className="w-64 shrink-0 bg-mn-800 border border-mn-600 rounded p-4 self-start sticky top-24 max-h-[calc(100vh-120px)] flex flex-col" style={{borderRightWidth:'4px',borderRightColor:'#f97316',overflow:'visible'}}>
+                    <div className="flex justify-between items-center mb-3 shrink-0">
+                        <p className="text-[11px] font-bold text-orange-400 uppercase tracking-widest">
+                            ⏱ משימות מתוזמנות ({scheduledTasks.length})
+                        </p>
+                        <button
+                            onClick={() => setShowForm(v => !v)}
+                            className={`text-[11px] font-bold px-2 py-0.5 rounded-md transition-colors ${showForm ? 'bg-orange-600 text-white' : 'bg-mn-700 text-orange-400 hover:bg-orange-600 hover:text-white'}`}>
+                            {showForm ? '×' : '+ הוסף'}
+                        </button>
+                    </div>
+
+                    {showForm && (
+                        <div className="mb-3 p-3 bg-mn-700/60 border border-mn-600 rounded space-y-2 shrink-0">
+                            <input
+                                type="date"
+                                dir="ltr"
+                                value={newDate}
+                                onChange={e => setNewDate(e.target.value)}
+                                className="w-full bg-mn-950 border border-mn-700 rounded px-2 py-1.5 text-xs text-mn-t outline-none focus:border-orange-500 [color-scheme:dark]"
+                                title="תאריך (אופציונלי)"
+                            />
+                            <input
+                                type="time"
+                                dir="ltr"
+                                value={newTime}
+                                onChange={e => setNewTime(e.target.value)}
+                                className="w-full bg-mn-950 border border-mn-700 rounded px-2 py-1.5 text-sm font-mono text-orange-300 outline-none focus:border-orange-500 [color-scheme:dark]"
+                            />
+                            <input
+                                type="text"
+                                value={newText}
+                                onChange={e => setNewText(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') submitManual(); }}
+                                placeholder="תיאור המשימה..."
+                                className="w-full bg-mn-950 border border-mn-700 rounded px-2 py-1.5 text-sm outline-none focus:border-orange-500 text-mn-t placeholder:text-mn-td"
+                            />
+                            {incidents.length > 0 && (
+                                <select
+                                    value={selectedIncidentId}
+                                    onChange={e => setSelectedIncidentId(e.target.value)}
+                                    className="w-full bg-mn-950 border border-mn-700 rounded px-2 py-1.5 text-xs text-mn-t outline-none focus:border-orange-500 [color-scheme:dark]">
+                                    <option value="">ללא אירוע (ידני)</option>
+                                    {incidents.map(inc => (
+                                        <option key={inc.id} value={inc.id}>
+                                            {inc.closed ? '🔒 ' : ''}{inc.name} — {inc.type}
+                                        </option>
+                                    ))}
+                                </select>
+                            )}
+                            <button
+                                onClick={submitManual}
+                                disabled={!newTime || !newText.trim()}
+                                className="w-full bg-orange-600 hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed py-1.5 rounded text-xs font-bold transition-colors">
+                                הוסף משימה
+                            </button>
+                        </div>
+                    )}
+
+                    {scheduledTasks.length === 0 ? (
+                        <p className="text-xs text-mn-td italic">אין משימות עם שעה מוגדרת</p>
+                    ) : (
+                        <div className="space-y-2 overflow-y-auto scroll-thin flex-1">
+                            {scheduledTasks.map(task => {
+                                const isToday = task.date === todayStr || !task.date;
+                                const isTomorrow = task.date === tomorrowStr;
+                                const currentHour = now.getHours();
+                                const taskHour = parseInt(task.time.split(':')[0], 10);
+                                const isOvernightTask = currentHour >= 20 && taskHour < 12;
+                                const isPast = isToday && !isOvernightTask && task.time <= currentTime;
+                                return (
+                                    <div key={task.taskId} className={`rounded p-2.5 border ${isPast ? 'border-red-800 bg-red-950/30' : 'border-mn-600 bg-mn-700/50'}`}>
+                                        <div className="flex items-center justify-between gap-1 mb-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`text-sm font-mono font-bold ${isPast ? 'text-red-400 blink-red' : 'text-orange-400'}`}>{task.time}</span>
+                                                {isPast && <span className="text-[10px] font-black text-red-500">עבר!</span>}
+                                                {isTomorrow && <span className="text-[10px] font-bold text-blue-400">מחר</span>}
+                                            </div>
+                                            {task.source === 'manual' && (
+                                                <button
+                                                    onClick={() => onRemoveManual(task.taskId)}
+                                                    className="text-mn-td hover:text-red-400 text-base leading-none transition-colors shrink-0"
+                                                    title="הסר">×</button>
+                                            )}
+                                        </div>
+                                        <p className="text-xs text-mn-t leading-snug">{task.text}</p>
+                                        <p className="text-[10px] mt-1 truncate">
+                                            <span className={`${task.source === 'manual' ? 'text-orange-500/70' : 'text-mn-td'}`}>
+                                                {task.source === 'manual' ? '✎ ידני' : task.incidentName}
+                                            </span>
+                                        </p>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const ScheduleAlertModal = ({ alert, onDismiss }) => {
+            if (!alert) return null;
+            return (
+                <div className="fixed inset-0 bg-black/85 flex items-center justify-center z-[60] p-4">
+                    <div className="alert-glow bg-mn-800 border-2 border-mn-gold rounded p-8 w-full max-w-md shadow-2xl text-center">
+                        <div className="text-5xl mb-4">⏰</div>
+                        <p className="text-[11px] font-black text-mn-gold uppercase tracking-widest mb-1">התראת זמן</p>
+                        <p className="text-5xl font-mono font-black text-white mb-5">{alert.time}</p>
+                        <p className="text-base text-mn-t font-semibold mb-2 leading-snug">{alert.text}</p>
+                        <p className="text-sm text-mn-tm mb-7">אירוע: {alert.incidentName}</p>
+                        <button onClick={onDismiss}
+                            className="bg-mn-gold hover:bg-mn-goldh px-8 py-3 rounded font-black text-lg w-full text-mn-950 uppercase tracking-wider transition-colors">
+                            קיבלתי ✓
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // ---------- Super Magnus: Senior Operational Dispatcher ----------
+        //
+        // Dispatcher charter (system prompt for Super Magnus). The retrieval layer
+        // below enforces these rules — edits here must preserve the intent.
+        //
+        //   תפקיד: דיספצ'ר בכיר (Senior Operational Dispatcher) של דסק האירועים
+        //     המבצעי ב-MAGNUS. המשיב מדבר כמפקד משמרת מנוסה: תמציתי, סדור,
+        //     חד-משמעי, ללא ניחושים.
+        //   שפה: עברית מקצועית, נקייה, בגוף שני או ציווי. ללא עירוב אנגלית
+        //     (חוץ ממונחים טכניים שמופיעים במסמך עצמו).
+        //   מקור אמת יחיד: protocols.md. חל איסור מוחלט לענות מידע שלא מופיע
+        //     באופן מפורש במסמך. אין ניחוש, אין הכללה, אין השלמה "הגיונית",
+        //     אין שימוש בידע חיצוני או בהיסטוריית שיחות.
+        //   חוסר מידע: כאשר התשובה לא מופיעה במסמך, יש להחזיר אך ורק את
+        //     המחרוזת המדויקת "המידע לא נמצא בפרוטוקולים." — ללא תוספות.
+        //   פורמט פלט: לכל תשובה פרוצדורלית, רשימת פעולות, סד"פ או צעדי ביצוע —
+        //     פלט ממוספר בעברית בצורה "שלב 1: …", "שלב 2: …". לשאילתות הגדרה/
+        //     איתור נקודתי — משפט עברית אחד תמציתי. תמיד לצטט את מספר השקף.
+        //
+        // מקור התוכן הוא protocols.md. הקובץ protocols_kb.js הוא ארטיפקט בנוי
+        // אוטומטית (build_protocols_md.py) שמשקף את התוכן של protocols.md —
+        // ככה שהאפליקציה עובדת גם כשפותחים את index.html כ-file://.
+
+        const SM_DISPATCHER_GREETING =
+            'שלום, אני Super Magnus — דיספצ\'ר הדסק המבצעי. אענה אך ורק על סמך protocols.md. אם תשובה לא מופיעה במסמך, אציין זאת במפורש.';
+        const SM_NOT_FOUND = 'המידע לא נמצא בפרוטוקולים.';
+
+        const SM_STOPWORDS_HE = new Set(['את','של','על','עם','לא','כן','יש','אין','מה','איך','כמה','איפה','מתי','למה','היא','הוא','הן','הם','אני','אתה','אנחנו','אתם','אתן','זה','זאת','זו','אלה','אלו','גם','רק','כל','כמו','כי','אם','כאשר','אחרי','לפני','תוך','בין','מול','אצל','או','אבל','אחר','עד','ואת','לכן','אך','עוד','וגם','שהוא','שהיא','בו','בה','להם','לה','לו','וכן','הזה','הזאת']);
+        const SM_STOPWORDS_EN = new Set(['the','a','an','is','are','was','were','and','or','of','to','for','in','on','at','by','with','from','what','how','why','when','where','who','which','that','this','it','be','been','being','do','does','did','have','has','had','can','could','will','would','should','may','might','must','them','they','their','there','these','those','you','your','we','our','my','me','us','as','not','but','so','if','about']);
+        const SM_HE_PREFIXES = ['וה','שה','כש','לכ','מה','בה','לה','ל','ב','מ','ה','ו','ש','כ'];
+
+        // ─── Action-verb lexicons ──────────────────────────────────────────────────
+        // Used by the intent classifier AND by section profiling at parse time.
+        // "Operational" sections are identified by having many of these tokens.
+        const SM_ACTION_VERBS_HE = new Set([
+            'תשאול','תשאל','הרם','וודא','ודא','בדוק','שלח','צלצל','עדכן','פתח',
+            'סגור','הפעל','פנה','יצור','קשר','תאם','הזמן','הכן','הכנס','העבר',
+            'הוצא','ערוך','שמור','תעד','דווח','בצע','חייג','ענה','המשך','כתוב',
+            'קרא','בקש','ספק','אשר','לוודא','לבדוק','לשלוח','לפנות','ליצור',
+            'לתאם','לעדכן','לפתוח','לסגור','להפעיל','להכין','להכניס','להעביר',
+            'לתעד','לדווח','לבצע','לחייג','לענות','להמשיך','לכתוב','לקרוא',
+            'לבקש','לאשר','לוודא','לסווג','לתחקר','לתאם'
+        ]);
+        const SM_ACTION_VERBS_EN = new Set([
+            'verify','confirm','call','send','check','open','close','activate',
+            'contact','coordinate','prepare','update','document','report','proceed',
+            'respond','notify','evacuate','dispatch','alert','monitor','transfer',
+            'escalate','initiate','complete','record','follow'
+        ]);
+
+        const SM_SYNONYMS = {
+            'sar': ['איתור','חילוץ','תחקור'],
+            'search': ['איתור'],
+            'rescue': ['חילוץ'],
+            'initial': ['ראשוני','תחקור'],
+            'questions': ['שאלות','תחקור'],
+            'question': ['שאלה','תחקור'],
+            'interrogation': ['תחקור'],
+            'annapurna': ['אנאפורנה'],
+            'everest': ['אוורסט'],
+            'langtang': ['לנגטנג'],
+            'manaslu': ['מנאסלו'],
+            'kanchenjunga': ['קאנצנגונגה'],
+            'trek': ['טרק','מסלול','טיול'],
+            'trekking': ['טרקים','מסלולים'],
+            'circuit': ['סובב'],
+            'duration': ['משך','ימים','זמן'],
+            'long': ['משך','ימים'],
+            'days': ['ימים'],
+            'nepal': ['נפאל'],
+            'medical': ['רפואי','רפואה'],
+            'mental': ['נפשי','נפש'],
+            'insurance': ['ביטוח'],
+            'evacuation': ['פינוי','חילוץ'],
+            'helicopter': ['מסוק','מסוקים'],
+            'hospital': ['בית','חולים','אשפוז'],
+            'incident': ['אירוע'],
+            'protocol': ['נוהל','פרוטוקול'],
+            'shift': ['משמרת'],
+            'handover': ['חפיפה','העברת'],
+            'contact': ['קשר','יצירת'],
+            'satellite': ['לוויני','לווייני'],
+            'phone': ['טלפון','פלאפון'],
+            'family': ['משפחה','קרובים'],
+            'israeli': ['ישראלי','ישראליות'],
+            'foreign': ['זרות','זר'],
+            'dispatch': ['צוות','הפעלה'],
+            'operation': ['תפעול','הפעלה'],
+            'company': ['חברת','חברה']
+        };
+
+        const smNormalizeToken = (t) => {
+            if (!t) return '';
+            t = t.replace(/[\u0591-\u05C7]/g, '');
+            t = t.toLowerCase();
+            if (/^[\u0590-\u05FF]/.test(t)) {
+                for (const p of SM_HE_PREFIXES) {
+                    if (t.startsWith(p) && t.length - p.length >= 3) {
+                        t = t.slice(p.length);
+                        break;
+                    }
+                }
+                const suffixes = ['יות','ות','ים','ית','ה','ת','י'];
+                for (const s of suffixes) {
+                    if (t.endsWith(s) && t.length - s.length >= 3) {
+                        t = t.slice(0, -s.length);
+                        break;
+                    }
+                }
+            }
+            return t;
+        };
+
+        const smTokenize = (text) => {
+            if (!text) return [];
+            const raw = text
+                .replace(/[\u0591-\u05C7]/g, '')
+                .split(/[^\u0590-\u05FFa-zA-Z0-9']+/)
+                .filter(Boolean);
+            const tokens = [];
+            for (const r of raw) {
+                const lower = r.toLowerCase();
+                if (SM_STOPWORDS_EN.has(lower) || SM_STOPWORDS_HE.has(lower)) continue;
+                if (lower.length < 2) continue;
+                tokens.push(smNormalizeToken(lower));
+            }
+            return tokens;
+        };
+
+        const smExpandQuery = (tokens) => {
+            const out = new Set(tokens);
+            for (const t of tokens) {
+                const syns = SM_SYNONYMS[t];
+                if (syns) syns.forEach(s => out.add(smNormalizeToken(s)));
+            }
+            return [...out];
+        };
+
+        // Parse protocols.md into per-slide sections keyed by markdown H2 headers.
+        // Expected heading: `## שקף N — TITLE` (em dash, en dash, or hyphen all work).
+        const SM_HEADING_RE = /^##\s*שקף\s*(\d+)\s*[—–\-:]\s*(.+?)\s*$/;
+        const smBuildSectionsFromMarkdown = (md) => {
+            if (!md) return [];
+            const out = [];
+            let cur = null;
+            for (const raw of md.split('\n')) {
+                const m = raw.match(SM_HEADING_RE);
+                if (m) {
+                    if (cur) out.push(cur);
+                    cur = { slide: parseInt(m[1], 10), title: m[2].trim(), rawLines: [] };
+                    continue;
+                }
+                if (!cur) continue;
+                cur.rawLines.push(raw);
+            }
+            if (cur) out.push(cur);
+
+            for (const s of out) {
+                const lines = [];
+                const bullets = [];
+                for (const raw of s.rawLines) {
+                    const line = raw.trim();
+                    if (!line) continue;
+                    if (line === '_(ללא תוכן נוסף)_') continue;
+                    if (line.startsWith('- ')) {
+                        const b = line.slice(2).trim();
+                        lines.push(b);
+                        bullets.push(b);
+                    } else if (/^\*\*.+\*\*$/.test(line)) {
+                        lines.push(line.replace(/\*\*/g, '').trim());
+                    } else if (line.startsWith('> ') || line === '---') {
+                        continue;
+                    } else {
+                        lines.push(line);
+                    }
+                }
+                s.lines = lines;
+                s.bullets = bullets;
+
+                // ── Section profile ── computed once, used by the reranker ──────
+                // isProtocol: title signals this is a procedure/checklist/SOP
+                s.isProtocol = /נוהל|סד"פ|סדר\s+פעולות|תפעול|פרוטוקול|שלבי|צעדי/.test(s.title);
+                // isInfoSection: title signals this is background/fact/reference
+                s.isInfoSection = /מידע|תיאור|רקע|הגדרה|ביטוח|מסלול|עונ|כללי|עקרונות|לקוחות|חברה|תפקיד/.test(s.title);
+                const lineCount = lines.length || 1;
+                // bulletDensity: 0→all prose, 1→all bullets — high = action-list feel
+                s.bulletDensity = bullets.length / lineCount;
+                // hasNumberedSteps: section already contains "שלב N" numbering
+                s.hasNumberedSteps = lines.some(l => /^(שלב|step)\s*\d/i.test(l));
+                // actionVerbDensity: fraction of meaningful tokens that are action verbs
+                const allLineTokens = smTokenize(lines.join(' '));
+                s.actionVerbCount = allLineTokens.filter(
+                    t => SM_ACTION_VERBS_HE.has(t) || SM_ACTION_VERBS_EN.has(t)
+                ).length;
+                s.actionVerbDensity = s.actionVerbCount / Math.max(1, allLineTokens.length);
+
+                const allText = [s.title, ...lines].join(' ');
+                s.tokens = smTokenize(allText);
+                s.tokenCounts = {};
+                for (const t of s.tokens) s.tokenCounts[t] = (s.tokenCounts[t] || 0) + 1;
+                s.titleTokens = new Set(smTokenize(s.title));
+                s.length = s.tokens.length;
+            }
+            return out.filter(s => s.length > 0);
+        };
+
+        const smBuildIdf = (sections) => {
+            const df = {};
+            for (const c of sections) {
+                for (const t of new Set(c.tokens)) df[t] = (df[t] || 0) + 1;
+            }
+            const N = sections.length;
+            const idf = {};
+            for (const t in df) idf[t] = Math.log((N - df[t] + 0.5) / (df[t] + 0.5) + 1);
+            return idf;
+        };
+
+        // ─── First-pass scorer (BM25 + intent-aware boosts) ────────────────────────
+        //
+        // intent is the object from smAnalyzeIntent. Boosts are intentionally mild
+        // here (≤30%) so they only break near-ties — the reranker does the heavy
+        // lifting on the top-5. This avoids over-weighting at the retrieval stage.
+        //
+        // Boost table for OPERATIONAL queries:
+        //   isProtocol section title → ×1.30
+        //   bulletDensity > 0.5     → ×1.15  (action-list feel)
+        //
+        // Boost table for INFORMATIONAL queries:
+        //   isInfoSection           → ×1.10
+        //   pure-procedure (high bullet + isProtocol) → ×0.85 (mild demotion)
+        const smScoreSections = (sections, idf, queryTokens, intent) => {
+            const k1 = 1.4, b = 0.75;
+            const avgLen = sections.reduce((a, c) => a + c.length, 0) / Math.max(1, sections.length);
+            const scored = [];
+            for (const c of sections) {
+                let score = 0;
+                let titleHits = 0;
+                for (const q of queryTokens) {
+                    const f = c.tokenCounts[q] || 0;
+                    if (f) {
+                        const w = idf[q] || 0;
+                        score += w * (f * (k1 + 1)) / (f + k1 * (1 - b + b * c.length / (avgLen || 1)));
+                    }
+                    if (c.titleTokens.has(q)) titleHits++;
+                }
+                if (titleHits > 0) score *= (1 + 0.7 * titleHits);
+                else score *= 0.7;
+                if (c.length < 6)   score *= 0.4;
+                if (c.length > 120) score *= 0.75;
+
+                // First-pass intent-aware boosts (mild — reranker handles the rest)
+                if (intent && score > 0) {
+                    if (intent.macro === 'operational') {
+                        if (c.isProtocol)          score *= 1.30;
+                        if (c.bulletDensity > 0.5) score *= 1.15;
+                    } else {
+                        if (c.isInfoSection)                              score *= 1.10;
+                        if (c.isProtocol && c.bulletDensity > 0.8)       score *= 0.85;
+                    }
+                }
+
+                if (score > 0) scored.push({ section: c, score });
+            }
+            scored.sort((a, b) => b.score - a.score);
+            return scored;
+        };
+
+        // KB bootstrap. Prefer live protocols.md when served over http(s), fall back
+        // to the generated shim (window.MAGNUS_PROTOCOLS_MD) for file:// usage.
+        let SM_SECTIONS = smBuildSectionsFromMarkdown(window.MAGNUS_PROTOCOLS_MD || '');
+        let SM_IDF = smBuildIdf(SM_SECTIONS);
+        let SM_READY = SM_SECTIONS.length > 0;
+
+        (async () => {
+            if (typeof window === 'undefined') return;
+            if (!/^https?:/.test(window.location.protocol)) return;
+            try {
+                const res = await fetch('./protocols.md', { cache: 'no-cache' });
+                if (!res.ok) return;
+                const text = await res.text();
+                if (!text) return;
+                const next = smBuildSectionsFromMarkdown(text);
+                if (next.length) {
+                    SM_SECTIONS = next;
+                    SM_IDF = smBuildIdf(SM_SECTIONS);
+                    SM_READY = true;
+                }
+            } catch (_) { /* stay with shim */ }
+        })();
+
+        // ─── Intent Analysis ───────────────────────────────────────────────────────
+        //
+        // Two-level classification applied BEFORE scoring (Step 1 of the pipeline):
+        //
+        //   macro = 'operational'   → user wants to know WHAT TO DO.
+        //     Signals: procedure words (איך/כיצד/נוהל/סד"פ), action verbs in query,
+        //     words like "שלבים", "צעדים", "מה עושים", "מה לעשות".
+        //     Effect: first-pass scorer boosts protocol/bullet-dense sections;
+        //     reranker strongly favors isProtocol + high actionVerbDensity.
+        //
+        //   macro = 'informational' → user wants FACTS / data.
+        //     Signals: factual-question words (מה זה/כמה ימים/מי/היכן/מתי/טלפון),
+        //     duration, location, contact lookups.
+        //     Effect: reranker favors isInfoSection, penalizes pure-procedure sections.
+        //
+        //   sub = fine-grained sub-intent (unchanged from before, drives answer format)
+
+        const SM_OP_RE = /(איך|כיצד|how|נוהל|סד"פ|סדר\s+פעולות|שלבים|שלבי|צעדים|מה\s+עושים|מה\s+לעשות|what\s+to\s+do|procedure|protocol|steps|checklist|לבצע|לוודא|לבדוק)/i;
+        const SM_INFO_RE = /(מה\s+זה|מהו|מהי|מה\s+ה|כמה\s+ימים|כמה\s+זמן|משך|היכן|איפה|מתי|טלפון|מספר|מייל|ביטוח\s+מה|כמה\s+עולה|שם\s+ה|when|who|where|how\s+long|how\s+many|duration|phone|email|what\s+is)/i;
+
+        const smAnalyzeIntent = (query) => {
+            const q = query.replace(/[\u0591-\u05C7]/g, '');
+            const qTokens = smTokenize(query);
+
+            // Count action verbs that appear in the query itself
+            const queryActionVerbs = qTokens.filter(
+                t => SM_ACTION_VERBS_HE.has(t) || SM_ACTION_VERBS_EN.has(t)
+            ).length;
+
+            const opSignal  = SM_OP_RE.test(q);
+            const infoSignal = SM_INFO_RE.test(q);
+
+            // Sub-intent: drives answer format (steps vs sentence vs list)
+            let sub = 'generic';
+            if (/(כמה\s+ימים|כמה\s+זמן|משך|how\s+long|how\s+many\s+days|duration)/i.test(q)) sub = 'duration';
+            else if (/(איפה|היכן|באיזה\s+מקום|מיקום|where|location)/i.test(q)) sub = 'location';
+            else if (/(טלפון|לוויני|מספר|איש\s+קשר|פקס|מייל|דוא"ל|אימייל|phone|contact|email)/i.test(q)) sub = 'contact';
+            else if (/(איך|כיצד|how|נוהל|סד"פ|סדר\s+פעולות|שלבים|שלבי|צעדים)/i.test(q)) sub = 'procedure';
+            else if (/(שאלות|רשימת|רשימה|מה\s+כולל|list)/i.test(q)) sub = 'list';
+            else if (/(מה\s+זה|מהו|מהי|מה\s+ה|מה\s+כוונת|מה\s+פירוש|what\s+is)/i.test(q)) sub = 'definition';
+            else if (/(מי\s|who\s|who$)/i.test(q)) sub = 'who';
+
+            // Macro decision tree
+            let macro;
+            if (opSignal && !infoSignal) {
+                macro = 'operational';
+            } else if (infoSignal && !opSignal) {
+                macro = 'informational';
+            } else if (opSignal && infoSignal) {
+                // Both: lean operational if the query contains action verbs or a procedure sub-intent
+                macro = (queryActionVerbs > 0 || sub === 'procedure' || sub === 'list')
+                    ? 'operational' : 'informational';
+            } else {
+                // No explicit signal: procedure/list/generic → assume they want to DO something
+                macro = (sub === 'procedure' || sub === 'list' || sub === 'generic')
+                    ? 'operational' : 'informational';
+            }
+
+            return { macro, sub };
+        };
+
+        // Rank candidate lines inside a matched section by overlap with the query.
+        // Lines with zero overlap are dropped — no silent fallback that would let
+        // the dispatcher "drift" off-source.
+        const smPickRelevantLines = (lines, qTokens, max) => {
+            const scored = lines
+                .map((line, i) => {
+                    const lt = new Set(smTokenize(line));
+                    let score = 0;
+                    for (const q of qTokens) if (lt.has(q)) score += 1;
+                    return { line, i, score };
+                })
+                .filter(r => r.score > 0)
+                .sort((a, b) => b.score - a.score || a.i - b.i)
+                .slice(0, max)
+                .sort((a, b) => a.i - b.i)
+                .map(r => r.line);
+            return scored;
+        };
+
+        // ─── Reranker (Step 2 of the pipeline) ────────────────────────────────────
+        //
+        // Takes the top-5 BM25 candidates and re-scores them using intent-specific
+        // signals that BM25 cannot express (structure of the section, verb density,
+        // whether it is a procedural protocol vs a background fact sheet).
+        //
+        // OPERATIONAL reranker weights:
+        //   isProtocol title          → ×1.40  (primary signal — "this IS a SOP")
+        //   bulletDensity > 0.6       → ×1.25  (action-list structure)
+        //   actionVerbDensity > 0.05  → ×1.20  (body full of imperative verbs)
+        //   hasNumberedSteps          → ×1.15  (already numbered = clear procedure)
+        //   isInfoSection (no proto)  → ×0.80  (background / insurance facts, penalise)
+        //
+        // INFORMATIONAL reranker weights:
+        //   isInfoSection             → ×1.20  (direct fact section)
+        //   ≥2 query tokens in title  → ×1.30  (title is a direct name-match)
+        //   pure-procedure (high bullet) → ×0.85  (not what a fact-seeker wants)
+        const smRerank = (candidates, intent, qTokens) => {
+            if (candidates.length <= 1) return candidates;
+
+            const rescored = candidates.map(({ section: s, score: bm25 }) => {
+                let rerank = bm25;
+
+                if (intent.macro === 'operational') {
+                    if (s.isProtocol)                         rerank *= 1.40;
+                    if (s.bulletDensity > 0.6)                rerank *= 1.25;
+                    if (s.actionVerbDensity > 0.05)           rerank *= 1.20;
+                    if (s.hasNumberedSteps)                    rerank *= 1.15;
+                    if (s.isInfoSection && !s.isProtocol)     rerank *= 0.80;
+                } else {
+                    if (s.isInfoSection)                       rerank *= 1.20;
+                    if (s.isProtocol && s.bulletDensity > 0.8) rerank *= 0.85;
+                    const titleHits = qTokens.filter(q => s.titleTokens.has(q)).length;
+                    if (titleHits >= 2)                        rerank *= 1.30;
+                }
+
+                return { section: s, score: rerank };
+            });
+
+            rescored.sort((a, b) => b.score - a.score);
+            return rescored;
+        };
+
+        // Build the dispatcher-style structured reply.
+        //   • Procedural / list / checklist → "שלב 1: …" numbered Hebrew steps.
+        //   • Single-fact lookups → one concise Hebrew sentence.
+        // Returns null when the section has no line that actually matches the query,
+        // so the caller can surface SM_NOT_FOUND.
+        const smBuildDispatcherAnswer = (picked, qTokens, intent) => {
+            const top = picked[0].section;
+            const header = `📋 ${top.title} (שקף ${top.slide})`;
+
+            const wantsSteps = intent === 'procedure' || intent === 'list' || intent === 'generic';
+            const bullets = Array.isArray(top.bullets) ? top.bullets : [];
+
+            if (wantsSteps && bullets.length >= 2) {
+                const relevant = smPickRelevantLines(bullets, qTokens, 8);
+                if (relevant.length >= 2) {
+                    const steps = relevant.map((l, i) => `שלב ${i + 1}: ${l}`).join('\n');
+                    return `${header}\n\n${steps}`;
+                }
+                if (relevant.length === 1) {
+                    return `${header}\n\n${relevant[0]}`;
+                }
+            }
+
+            const lines = Array.isArray(top.lines) ? top.lines : [];
+            const relevant = smPickRelevantLines(lines, qTokens, wantsSteps ? 6 : 3);
+            if (!relevant.length) return null;
+
+            if (relevant.length >= 2 && wantsSteps) {
+                const steps = relevant.map((l, i) => `שלב ${i + 1}: ${l}`).join('\n');
+                return `${header}\n\n${steps}`;
+            }
+            return `${header}\n\n${relevant.join(' ').replace(/\s+/g, ' ').trim()}`;
+        };
+
+        // Strict retrieval gate. A question is answered only when:
+        //   1. At least `minHits` unique query tokens appear in the top section.
+        //   2. At least one of those tokens is specific (IDF ≥ SM_MIN_SPECIFIC_IDF) —
+        //      prevents matches on generic words like "נוהל" or "אירוע" alone.
+        //   3. The top section contains at least one line that overlaps the query.
+        // Any failure returns `found: false`, which the UI converts to SM_NOT_FOUND.
+        const SM_MIN_SCORE = 3.5;
+        const SM_MIN_SPECIFIC_IDF = 1.8;
+
+        // ─── Two-pass retrieval pipeline ───────────────────────────────────────────
+        //
+        //  Pass 1 — smAnalyzeIntent → smScoreSections (intent-boosted BM25)
+        //    Classifies the query as operational or informational, then runs BM25
+        //    with lightweight first-pass boosts (≤30%) to surface relevant sections.
+        //    A strict gate (score threshold + specificity check) blocks weak matches
+        //    before they reach the reranker.
+        //
+        //  Pass 2 — smRerank on top-5
+        //    Reorders candidates using structure signals (bullet density, action verb
+        //    density, isProtocol, isInfoSection). This is where "insurance fact vs
+        //    rescue procedure" separation actually happens.
+        //
+        //  Answer — smBuildDispatcherAnswer using the reranker winner
+        //    Formats the answer as numbered Hebrew steps (operational) or a concise
+        //    sentence (informational). Always cites slide(s).
+        const smAnswer = (query) => {
+            if (!SM_READY) return { found: false, reason: 'kb_missing' };
+            const qRaw = smTokenize(query);
+            if (!qRaw.length) return { found: false, reason: 'empty_query' };
+            const qTokens = smExpandQuery(qRaw);
+
+            // ── Step 1: classify intent before scoring ──────────────────────────
+            const intent = smAnalyzeIntent(query);
+
+            // ── Pass 1: intent-boosted BM25 ────────────────────────────────────
+            const scored = smScoreSections(SM_SECTIONS, SM_IDF, qTokens, intent);
+            if (!scored.length) return { found: false, reason: 'no_match' };
+
+            // Strict gate on the raw BM25 winner — blocks spurious matches
+            const top = scored[0];
+            const uniqueHits = new Set();
+            let specificHit = false;
+            for (const q of qTokens) {
+                if (top.section.tokenCounts[q]) {
+                    uniqueHits.add(q);
+                    if ((SM_IDF[q] || 0) >= SM_MIN_SPECIFIC_IDF) specificHit = true;
+                }
+            }
+            const minHits = Math.min(2, qRaw.length);
+            if (top.score < SM_MIN_SCORE || uniqueHits.size < minHits || !specificHit) {
+                return { found: false, reason: 'weak_match' };
+            }
+
+            // ── Pass 2: rerank top-5 by intent ─────────────────────────────────
+            const candidates = scored.slice(0, 5);
+            const reranked  = smRerank(candidates, intent, qTokens);
+
+            // ── Answer: build from reranker winner ──────────────────────────────
+            const picked = reranked.slice(0, 3);
+            const body   = smBuildDispatcherAnswer(picked, qTokens, intent.sub);
+            if (!body) return { found: false, reason: 'no_info' };
+
+            return {
+                found:      true,
+                answer:     body,
+                sources:    picked.map(p => p.section.slide),
+                intentType: intent.macro,   // exposed to UI for intent badge
+            };
+        };
+
+        const SuperMagnusChat = ({ open, onClose }) => {
+            const [messages, setMessages] = useState([
+                { role: 'assistant', text: SM_READY
+                    ? SM_DISPATCHER_GREETING
+                    : 'מקור האמת (protocols.md) לא נטען. ודא שהקובץ קיים לצד ה-HTML, או שה-shim protocols_kb.js נטען.' }
+            ]);
+            const [input, setInput] = useState('');
+            const [thinking, setThinking] = useState(false);
+            const scrollRef = useRef(null);
+            const inputRef = useRef(null);
+
+            useEffect(() => {
+                if (open && inputRef.current) setTimeout(() => inputRef.current && inputRef.current.focus(), 300);
+            }, [open]);
+
+            useEffect(() => {
+                if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            }, [messages, thinking]);
+
+            const ask = () => {
+                const q = input.trim();
+                if (!q || thinking) return;
+                setMessages(m => [...m, { role: 'user', text: q }]);
+                setInput('');
+                setThinking(true);
+                setTimeout(() => {
+                    const res = smAnswer(q);
+                    let reply;
+                    if (!res.found) {
+                        reply = { role: 'assistant', text: SM_NOT_FOUND, notFound: true };
+                    } else {
+                        reply = { role: 'assistant', text: res.answer, sources: res.sources, intentType: res.intentType };
+                    }
+                    setMessages(m => [...m, reply]);
+                    setThinking(false);
+                }, 180);
+            };
+
+            const onKey = (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    ask();
+                }
+            };
+
+            const suggestions = [
+                'מה השאלות הראשוניות באירוע איתור?',
+                'כמה ימים סובב אנאפורנה?',
+                'נוהל הפעלת ASSET',
+                'סד"פ אירוע חילוץ',
+            ];
+
+            return (
+                <>
+                    <div
+                        onClick={onClose}
+                        className={`sm-backdrop fixed inset-0 bg-black/60 z-40 ${open ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                    />
+                    <aside
+                        className={`sm-panel fixed top-0 left-0 h-full w-full sm:w-[420px] bg-mn-900 border-l border-mn-700 z-50 flex flex-col shadow-2xl ${open ? '' : 'closed'}`}
+                        dir="rtl"
+                        aria-hidden={!open}
+                    >
+                        <div className="flex items-center justify-between p-4 border-b border-mn-600 bg-mn-800">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded bg-mn-gold flex items-center justify-center text-mn-950 font-black text-sm tracking-wider shadow-lg">
+                                    SM
+                                </div>
+                                <div>
+                                    <div className="font-black text-white tracking-wider uppercase text-sm">SuperMagnus</div>
+                                    <div className="text-[11px] text-mn-td">דיספצ'ר מבצעי • {SM_SECTIONS.length} שקפים מ-protocols.md</div>
+                                </div>
+                            </div>
+                            <button onClick={onClose} className="text-mn-tm hover:text-white w-8 h-8 rounded hover:bg-mn-700 flex items-center justify-center text-lg transition-colors" aria-label="סגור">✕</button>
+                        </div>
+
+                        <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-thin px-4 py-4 space-y-3">
+                            {messages.map((m, i) => (
+                                <div key={i} className={`sm-msg-bubble flex ${m.role === 'user' ? 'justify-start' : 'justify-end'}`}>
+                                    <div className={`max-w-[85%] rounded px-4 py-2.5 text-sm leading-relaxed ${
+                                        m.role === 'user'
+                                            ? 'bg-mn-gold text-mn-950 font-semibold'
+                                            : m.notFound
+                                                ? 'bg-mn-800 border border-red-500/40 text-red-300'
+                                                : 'bg-mn-800 border border-mn-700 text-mn-t'
+                                    }`}>
+                                        {m.intentType && (
+                                            <div className="mb-1.5 flex justify-end">
+                                                {m.intentType === 'operational'
+                                                    ? <span className="text-[9px] font-bold tracking-widest uppercase px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300 border border-orange-500/30">⚙ מבצעי</span>
+                                                    : <span className="text-[9px] font-bold tracking-widest uppercase px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30">ℹ מידע</span>
+                                                }
+                                            </div>
+                                        )}
+                                        {m.text && <div className="whitespace-pre-wrap">{m.text}</div>}
+                                        {m.sources && m.sources.length > 0 && (
+                                            <div className="mt-2 pt-2 border-t border-mn-700/60 text-[10px] text-mn-td">
+                                                {m.sources.length === 1
+                                                    ? `מקור: שקף ${m.sources[0]}`
+                                                    : `מקורות: שקפים ${m.sources.join(', ')}`}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                            {thinking && (
+                                <div className="flex justify-end">
+                                    <div className="bg-mn-800 border border-mn-700 rounded px-4 py-3 sm-typing">
+                                        <span></span><span></span><span></span>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {messages.length <= 1 && (
+                            <div className="px-4 pb-2">
+                                <div className="text-[11px] text-mn-td mb-2 font-bold">הצעות לשאלות:</div>
+                                <div className="flex flex-wrap gap-2">
+                                    {suggestions.map((s, i) => (
+                                        <button
+                                            key={i}
+                                            onClick={() => { setInput(s); setTimeout(() => inputRef.current && inputRef.current.focus(), 0); }}
+                                            className="text-[11px] bg-mn-800 hover:bg-mn-700 border border-mn-600 hover:border-mn-gold text-mn-tm hover:text-mn-gold px-3 py-1.5 rounded transition-colors"
+                                        >
+                                            {s}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="p-3 border-t border-mn-700 bg-mn-800">
+                            <div className="flex gap-2 items-end">
+                                <textarea
+                                    ref={inputRef}
+                                    value={input}
+                                    onChange={e => setInput(e.target.value)}
+                                    onKeyDown={onKey}
+                                    rows={1}
+                                    placeholder="שאל שאלה על הפרוטוקולים…"
+                                    className="flex-1 bg-mn-950 border border-mn-700 focus:border-mn-gold rounded px-3 py-2.5 text-sm text-mn-t placeholder:text-mn-td outline-none resize-none max-h-32"
+                                />
+                                <button
+                                    onClick={ask}
+                                    disabled={!input.trim() || thinking}
+                                    className="bg-mn-gold hover:bg-mn-goldh disabled:opacity-40 disabled:cursor-not-allowed text-mn-950 font-black px-4 py-2.5 rounded text-sm transition-colors uppercase"
+                                >
+                                    שלח
+                                </button>
+                            </div>
+                            <div className="text-[10px] text-mn-td mt-2 text-center">
+                                המענה מבוסס אך ורק על protocols.md. מידע שלא מופיע שם — לא נמסר.
+                            </div>
+                        </div>
+                    </aside>
+                </>
+            );
+        };
+
+        // ---------- Main App ----------
+
+        const App = () => {
+            const [view, setView] = useState('import');
+            const [rawInput, setRawInput] = useState('');
+            const [state, setState] = useState({ prefix: '', suffix: '', incidents: [], generalTasks: [], generalTasksHeaderLine: null, generalTasksTrailingLines: [], manualScheduledTasks: [] });
+            const [showAdd, setShowAdd] = useState(false);
+            const [showOutput, setShowOutput] = useState(false);
+            const [currentAlert, setCurrentAlert] = useState(null);
+            const [smOpen, setSmOpen] = useState(false);
+            const alertedIds = useRef(new Set());
+            const stateRef = useRef(state);
+            useEffect(() => { stateRef.current = state; }, [state]);
+
+            useEffect(() => {
+                try {
+                    const saved = localStorage.getItem('magnus_incidents_v5');
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        if (parsed && parsed.incidents) {
+                            if (!parsed.generalTasks) parsed.generalTasks = [];
+                            if (!parsed.generalTasksHeaderLine) parsed.generalTasksHeaderLine = null;
+                            if (!parsed.generalTasksTrailingLines) parsed.generalTasksTrailingLines = [];
+                            if (!parsed.manualScheduledTasks) parsed.manualScheduledTasks = [];
+                        }
+                        if (parsed && parsed.incidents && parsed.incidents.length > 0) {
+                            setState(parsed);
+                            setView('dashboard');
+                        }
+                    }
+                } catch (e) {}
+            }, []);
+
+            useEffect(() => {
+                localStorage.setItem('magnus_incidents_v5', JSON.stringify(state));
+            }, [state]);
+
+            const playAlertSound = () => {
+                try {
+                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    const freqs = [880, 660, 880, 1100];
+                    freqs.forEach((f, i) => osc.frequency.setValueAtTime(f, ctx.currentTime + i * 0.12));
+                    gain.gain.setValueAtTime(0.35, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.55);
+                    osc.start(ctx.currentTime);
+                    osc.stop(ctx.currentTime + 0.55);
+                } catch(e) {}
+            };
+
+            useEffect(() => {
+                const check = () => {
+                    const t = getCurrentTimeStr();
+                    const today = getTodayStr();
+                    const scheduled = getScheduledTasks(stateRef.current);
+                    for (const task of scheduled) {
+                        if (task.time === t && (!task.date || task.date === today) && !alertedIds.current.has(task.taskId)) {
+                            alertedIds.current.add(task.taskId);
+                            playAlertSound();
+                            setCurrentAlert(task);
+                            break;
+                        }
+                    }
+                };
+                check();
+                const interval = setInterval(check, 30000);
+                return () => clearInterval(interval);
+            }, []);
+
+            const handleImport = () => {
+                const parsed = parseProtocol(rawInput);
+                if (!parsed.incidents.length) {
+                    alert('לא זוהו אירועים. ודא ששורת הכותרת בפורמט: *שם | סוג | מיקום*');
+                    return;
+                }
+                setState(parsed);
+                setView('dashboard');
+            };
+
+            const handleNLP = (incId, text) => {
+                let resultRef = { type: 'detail', text };
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const openTasks = inc.tasks.filter(t => !t.done);
+                        const matched = detectTaskCompletion(text, openTasks);
+                        if (matched) {
+                            resultRef = { type: 'task-done', taskId: matched.id, taskText: matched.text };
+                            return { ...inc, tasks: inc.tasks.map(t => t.id === matched.id ? { ...t, done: true } : t) };
+                        }
+                        const newIdx = inc.detailLines.length;
+                        return {
+                            ...inc,
+                            detailLines: [...inc.detailLines, text],
+                            newDetailIds: [...(inc.newDetailIds || []), newIdx],
+                        };
+                    })
+                }));
+                return resultRef;
+            };
+
+            const handleAddUpdate = (incId, text) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const newIdx = inc.detailLines.length;
+                        return {
+                            ...inc,
+                            detailLines: [...inc.detailLines, text],
+                            newDetailIds: [...(inc.newDetailIds || []), newIdx],
+                        };
+                    })
+                }));
+            };
+
+            const handleAddTask = (incId, text, scheduledDate, scheduledTime) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const newTask = {
+                            id: rid(),
+                            rawLine: `• ${text}`,
+                            text: text,
+                            done: false,
+                            scheduledDate: scheduledDate || null,
+                            scheduledTime: scheduledTime || null,
+                        };
+                        return {
+                            ...inc,
+                            tasks: [...inc.tasks, newTask],
+                            tasksHeaderLine: inc.tasksHeaderLine || 'משימות:',
+                        };
+                    })
+                }));
+            };
+
+            const toggleTask = (incId, taskId) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc =>
+                        inc.id === incId
+                            ? { ...inc, tasks: inc.tasks.map(t => t.id === taskId ? { ...t, done: !t.done } : t) }
+                            : inc
+                    )
+                }));
+            };
+
+            const deleteDetailLine = (incId, lineIdx) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const newLines = inc.detailLines.filter((_, i) => i !== lineIdx);
+                        const newDetailIds = (inc.newDetailIds || [])
+                            .filter(id => id !== lineIdx)
+                            .map(id => id > lineIdx ? id - 1 : id);
+                        return { ...inc, detailLines: newLines, newDetailIds };
+                    })
+                }));
+            };
+
+            const deleteTask = (incId, taskId) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc =>
+                        inc.id === incId
+                            ? { ...inc, tasks: inc.tasks.filter(t => t.id !== taskId) }
+                            : inc
+                    )
+                }));
+            };
+
+            const editDetailLine = (incId, lineIdx, newText) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        const newLines = [...inc.detailLines];
+                        newLines[lineIdx] = newText;
+                        return { ...inc, detailLines: newLines };
+                    })
+                }));
+            };
+
+            const editTask = (incId, taskId, newText) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => {
+                        if (inc.id !== incId) return inc;
+                        return {
+                            ...inc,
+                            tasks: inc.tasks.map(t =>
+                                t.id === taskId
+                                    ? { ...t, text: newText, rawLine: `• ${newText}` }
+                                    : t
+                            )
+                        };
+                    })
+                }));
+            };
+
+            const closeIncident = (incId) => {
+                setState(prev => ({
+                    ...prev,
+                    incidents: prev.incidents.map(inc => inc.id === incId ? { ...inc, closed: true } : inc)
+                }));
+            };
+
+            const toggleGeneralTask = (taskId) => {
+                setState(prev => ({
+                    ...prev,
+                    generalTasks: (prev.generalTasks || []).map(t =>
+                        t.id === taskId ? { ...t, done: !t.done } : t
+                    )
+                }));
+            };
+
+            const addManualScheduledTask = ({ time, text, date, incidentId }) => {
+                if (incidentId) {
+                    setState(prev => ({
+                        ...prev,
+                        incidents: prev.incidents.map(inc => {
+                            if (inc.id !== incidentId) return inc;
+                            const newTask = {
+                                id: rid(),
+                                rawLine: `• ${text}`,
+                                text,
+                                done: false,
+                                scheduledDate: date || null,
+                                scheduledTime: time,
+                            };
+                            return {
+                                ...inc,
+                                tasks: [...inc.tasks, newTask],
+                                tasksHeaderLine: inc.tasksHeaderLine || 'משימות:',
+                            };
+                        }),
+                    }));
+                } else {
+                    setState(prev => ({
+                        ...prev,
+                        manualScheduledTasks: [...(prev.manualScheduledTasks || []), { id: rid(), time, text, date: date || null }],
+                    }));
+                }
+            };
+
+            const removeManualScheduledTask = (id) => {
+                setState(prev => ({
+                    ...prev,
+                    manualScheduledTasks: (prev.manualScheduledTasks || []).filter(t => t.id !== id),
+                }));
+            };
+
+            const addIncident = (data) => {
+                const newInc = {
+                    id: rid(),
+                    rawHeader: `*${data.name} | ${data.type} | ${data.location} *`,
+                    name: data.name,
+                    type: data.type,
+                    location: data.location,
+                    detailLines: data.details ? data.details.split('\n') : [],
+                    newDetailIds: [],
+                    tasksHeaderLine: data.tasks && data.tasks.trim() ? 'משימות:' : null,
+                    tasks: (data.tasks || '').split('\n').filter(l => l.trim()).map(l => ({
+                        id: rid(),
+                        rawLine: /^\s*[•\-]/.test(l) ? l : `•⁠  ⁠${l.trim()}`,
+                        text: l.replace(/^[\s•\-⁠\u2060\u2063]+/, '').trim(),
+                        done: false,
+                    })),
+                    trailingLines: [],
+                    closed: false,
+                };
+
+                setState(prev => {
+                    let next = { ...prev, incidents: [...prev.incidents, newInc] };
+                    if (!next.prefix && !next.suffix && next.incidents.length === 1) {
+                        next.prefix = '[סטטוס אירועים פתוחים';
+                        next.suffix = ']';
+                    }
+                    return next;
+                });
+                setShowAdd(false);
+            };
+
+            const resetAll = () => {
+                if (window.confirm('לאפס את כל הנתונים?')) {
+                    setState({ prefix: '', suffix: '', incidents: [], generalTasks: [], generalTasksHeaderLine: null, generalTasksTrailingLines: [] });
+                    setRawInput('');
+                    setView('import');
+                }
+            };
+
+            const output = useMemo(() => generateProtocol(state), [state]);
+            const allIncidents = [...state.incidents].sort((a, b) => {
+                if (a.closed === b.closed) return 0;
+                return a.closed ? 1 : -1;
+            });
+            const activeIncidents = state.incidents.filter(i => !i.closed);
+            const closedCount = state.incidents.length - activeIncidents.length;
+
+            return (
+                <div className="min-h-screen flex flex-col">
+                    <header className="magnus-header bg-mn-900 sticky top-0 z-40">
+                        <div className="max-w-6xl mx-auto flex justify-between items-center gap-4 px-6 py-3">
+                            {/* Left: Action buttons (RTL = visual left) */}
+                            <div className="flex items-center gap-3">
+                                <button onClick={() => setSmOpen(true)}
+                                    className="bg-mn-gold hover:bg-mn-goldh text-mn-950 px-4 py-2 rounded font-black text-xs tracking-wider uppercase transition-colors flex items-center gap-2"
+                                    title="SuperMagnus Chat - שאלות ותשובות מתוך תיק החפיפה">
+                                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-mn-950 animate-pulse"></span>
+                                    SuperMagnus
+                                </button>
+                                {state.incidents.length > 0 && (
+                                    <button onClick={resetAll} className="text-[11px] text-mn-td hover:text-red-400 px-2 py-1.5 border border-mn-600 hover:border-red-600 rounded transition-colors">אפס הכל</button>
+                                )}
+                            </div>
+                            {/* Center: Navigation */}
+                            <nav className="flex items-center gap-1 bg-mn-800 p-1 rounded border border-mn-600">
+                                {[['import','ייבוא'],['dashboard','לוח בקרה']].map(([key,label]) => (
+                                    <button key={key} onClick={() => setView(key)}
+                                        className={`px-4 py-1.5 rounded text-xs font-bold tracking-wide transition-all ${view === key ? 'bg-mn-gold text-mn-950' : 'text-mn-tm hover:text-mn-t'}`}>
+                                        {label}
+                                    </button>
+                                ))}
+                            </nav>
+                            {/* Right: Logo (RTL = visual right) */}
+                            <h1 className="flex items-center gap-3">
+                                <span className="text-mn-td text-[11px] font-light tracking-widest uppercase hidden sm:inline">ניהול אירועים</span>
+                                <span className="w-px h-5 bg-mn-600 hidden sm:inline-block"></span>
+                                <span className="font-black text-2xl tracking-[0.15em] uppercase text-white">MAGNUS</span>
+                            </h1>
+                        </div>
+                    </header>
+
+                    <main className="flex-1 px-6 py-8 max-w-6xl mx-auto w-full pb-32">
+                        {view === 'import' && (
+                            <div className="max-w-3xl mx-auto">
+                                <div className="mb-8 text-center">
+                                    <div className="inline-flex items-center gap-2 text-mn-gold text-xs font-bold uppercase tracking-widest mb-4 bg-mn-gold/10 border border-mn-gold/20 px-4 py-2 rounded">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-mn-gold animate-pulse inline-block"></span>
+                                        מערכת ניהול אירועים
+                                    </div>
+                                    <h2 className="text-4xl font-black text-white mb-3 leading-tight">ייבוא<br/><span className="text-mn-gold">העברת משמרת</span></h2>
+                                    <p className="text-mn-td text-sm max-w-md mx-auto">הדבק את הטקסט הגולמי של סטטוס האירועים הפתוחים. המבנה יישמר במדויק בפלט הסופי.</p>
+                                </div>
+                                <div className="bg-mn-800 border border-mn-600 rounded overflow-hidden shadow-2xl">
+                                    <div className="flex items-center gap-2 px-4 py-2.5 bg-mn-700 border-b border-mn-600">
+                                        <span className="w-2.5 h-2.5 rounded-full bg-red-500/70"></span>
+                                        <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/70"></span>
+                                        <span className="w-2.5 h-2.5 rounded-full bg-green-500/70"></span>
+                                        <span className="text-mn-td text-[11px] font-mono mr-2">protocol_input.txt</span>
+                                    </div>
+                                    <textarea
+                                        className="w-full h-80 bg-mn-950 p-5 font-mono text-sm outline-none text-mn-t placeholder:text-mn-td/50 resize-none"
+                                        placeholder="[סטטוס אירועים פתוחים&#10;*שם | סוג | מיקום *&#10;פרטים...&#10;משימות:&#10;• משימה 1&#10;]&#10;משימות כללי:&#10;• משימה כללית 1"
+                                        value={rawInput}
+                                        onChange={e => setRawInput(e.target.value)}/>
+                                </div>
+                                <button onClick={handleImport}
+                                    className="w-full mt-4 bg-mn-gold hover:bg-mn-goldh text-mn-950 py-4 rounded font-black text-base tracking-widest uppercase transition-colors shadow-lg shadow-mn-gold/20">
+                                    נתח וטען לוח בקרה ←
+                                </button>
+                            </div>
+                        )}
+
+                        {view === 'dashboard' && (
+                            <div>
+                                <div className="flex justify-between items-center mb-6 flex-wrap gap-3">
+                                    <div className="flex items-center gap-4">
+                                        <div className="w-1 h-10 bg-mn-gold rounded-full shrink-0"></div>
+                                        <div>
+                                            <p className="text-[11px] text-mn-td uppercase font-bold tracking-widest">אירועים פעילים</p>
+                                            <h2 className="text-2xl font-black text-white leading-none">{activeIncidents.length} פתוחים {closedCount > 0 && <span className="text-sm font-normal text-mn-td mr-2">· {closedCount} נסגרו</span>}</h2>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => setShowAdd(true)}
+                                            className="bg-mn-gold hover:bg-mn-goldh text-mn-950 px-5 py-2.5 rounded font-black text-sm tracking-wide uppercase transition-colors">
+                                            + אירוע חדש
+                                        </button>
+                                        <button onClick={() => setShowOutput(true)}
+                                            className="border border-emerald-600 hover:bg-emerald-600/20 text-emerald-400 hover:text-emerald-300 px-5 py-2.5 rounded font-bold text-sm tracking-wide transition-colors">
+                                            פלט סופי ↗
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {(() => {
+                                    const scheduledTasks = getScheduledTasks(state);
+                                    return (
+                                        <div className="flex gap-5 items-start">
+                                            <div className="flex-1 min-w-0">
+                                                {allIncidents.length === 0 ? (
+                                                    <div className="border border-dashed border-mn-600 rounded p-16 text-center">
+                                                        <div className="text-5xl mb-4 opacity-20">◈</div>
+                                                        <p className="text-mn-td mb-6 text-sm">אין אירועים כרגע</p>
+                                                        <button onClick={() => setShowAdd(true)}
+                                                            className="bg-mn-gold hover:bg-mn-goldh text-mn-950 px-6 py-3 rounded font-black text-sm uppercase tracking-wider transition-colors">
+                                                            + הוסף אירוע חדש
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                                        {allIncidents.map(inc => (
+                                                            <IncidentCard
+                                                                key={inc.id}
+                                                                incident={inc}
+                                                                onAddUpdate={handleAddUpdate}
+                                                                onAddTask={handleAddTask}
+                                                                onToggleTask={toggleTask}
+                                                                onClose={closeIncident}
+                                                                onEditDetailLine={editDetailLine}
+                                                                onEditTask={editTask}
+                                                                onDeleteDetailLine={deleteDetailLine}
+                                                                onDeleteTask={deleteTask}/>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="flex flex-col gap-5 shrink-0">
+                                                <ScheduledTasksSidebar
+                                                    scheduledTasks={scheduledTasks}
+                                                    onAddManual={addManualScheduledTask}
+                                                    onRemoveManual={removeManualScheduledTask}
+                                                    incidents={state.incidents}
+                                                />
+                                                <GeneralTasksPanel
+                                                    tasks={state.generalTasks}
+                                                    onToggleTask={toggleGeneralTask}
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
+                            </div>
+                        )}
+                    </main>
+
+                    {showAdd && <AddIncidentModal onClose={() => setShowAdd(false)} onAdd={addIncident}/>}
+                    {showOutput && <OutputModal text={output} onClose={() => setShowOutput(false)}/>}
+                    <ScheduleAlertModal alert={currentAlert} onDismiss={() => setCurrentAlert(null)}/>
+
+                    {!smOpen && (
+                        <button
+                            onClick={() => setSmOpen(true)}
+                            className="sm-fab fixed bottom-6 left-6 z-30 bg-gradient-to-br from-mn-gold to-mn-goldd text-mn-950 font-black w-14 h-14 rounded-full flex items-center justify-center text-lg"
+                            title="SuperMagnus Chat"
+                            aria-label="פתח SuperMagnus Chat"
+                        >
+                            SM
+                        </button>
+                    )}
+                    <SuperMagnusChat open={smOpen} onClose={() => setSmOpen(false)} />
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
