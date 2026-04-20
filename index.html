@@ -942,9 +942,14 @@
 
         const smTokenize = (text) => {
             if (!text) return [];
+            // Strip niqqud/cantillation (U+0591–U+05C7), then strip
+            // gershayim (U+05F4) / geresh (U+05F3) / ASCII & curly
+            // quotes so Hebrew acronyms (אר"ן, סד"פ, דוא"ל) stay
+            // as single tokens instead of shattering into 2-char fragments.
             const raw = text
                 .replace(/[\u0591-\u05C7]/g, '')
-                .split(/[^\u0590-\u05FFa-zA-Z0-9']+/)
+                .replace(/[\u05F3\u05F4"'\u2018\u2019\u201C\u201D]/g, '')
+                .split(/[^\u0590-\u05FFa-zA-Z0-9]+/)
                 .filter(Boolean);
             const tokens = [];
             for (const r of raw) {
@@ -1265,7 +1270,19 @@
 
             const lines = Array.isArray(top.lines) ? top.lines : [];
             const relevant = smPickRelevantLines(lines, qTokens, wantsSteps ? 6 : 3);
-            if (!relevant.length) return null;
+            if (!relevant.length) {
+                // No individual line contains the query tokens, but the
+                // section title did — the whole section IS the answer.
+                // Return its contents as-is instead of surfacing "not found".
+                const titleHit = qTokens.some(q => top.titleTokens.has(q));
+                if (!titleHit) return null;
+                if (wantsSteps && bullets.length >= 2) {
+                    const steps = bullets.slice(0, 8).map((l, i) => `שלב ${i + 1}: ${l}`).join('\n');
+                    return `${header}\n\n${steps}`;
+                }
+                const body = (bullets.length ? bullets.slice(0, 6) : lines.slice(0, 6)).join('\n');
+                return body ? `${header}\n\n${body}` : null;
+            }
 
             if (relevant.length >= 2 && wantsSteps) {
                 const steps = relevant.map((l, i) => `שלב ${i + 1}: ${l}`).join('\n');
@@ -1457,7 +1474,6 @@
             // Free-text short-circuit result. When set, supersedes the menu view.
             const [searchResult, setSearchResult] = useState(null);
             const [input, setInput] = useState('');
-            const [thinking, setThinking] = useState(false);
             const scrollRef = useRef(null);
             const inputRef = useRef(null);
 
@@ -1474,6 +1490,14 @@
                 if (scrollRef.current) scrollRef.current.scrollTop = 0;
             }, [navStack, searchResult]);
 
+            // Escape closes the panel — standard modal behavior.
+            useEffect(() => {
+                if (!open) return;
+                const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+                window.addEventListener('keydown', onKey);
+                return () => window.removeEventListener('keydown', onKey);
+            }, [open, onClose]);
+
             const goTo = (child) => { setSearchResult(null); setNavStack(s => [...s, child]); };
             const goBack = () => {
                 if (viewingResult) { setSearchResult(null); return; }
@@ -1481,9 +1505,12 @@
             };
             const goHome = () => { setSearchResult(null); setNavStack([SM_MENU_TREE]); };
 
-            const leafSections = (isLeaf && !viewingResult)
-                ? SM_SECTIONS.filter(s => smMatchLeaf(node, s)).sort((a, b) => a.slide - b.slide)
-                : [];
+            const leafSections = useMemo(() =>
+                (isLeaf && !viewingResult)
+                    ? SM_SECTIONS.filter(s => smMatchLeaf(node, s)).sort((a, b) => a.slide - b.slide)
+                    : [],
+                [isLeaf, viewingResult, node]
+            );
 
             const jumpToLeafForSlide = (slide) => {
                 const sec = SM_SECTIONS.find(x => x.slide === slide);
@@ -1494,14 +1521,10 @@
 
             const ask = () => {
                 const q = input.trim();
-                if (!q || thinking) return;
+                if (!q) return;
                 setInput('');
-                setThinking(true);
-                setTimeout(() => {
-                    const res = smAnswer(q);
-                    setSearchResult({ query: q, res });
-                    setThinking(false);
-                }, 180);
+                const res = smAnswer(q);
+                setSearchResult({ query: q, res });
             };
             const onKey = (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); }
@@ -1596,7 +1619,19 @@
                                 ) : (
                                     <div className="bg-mn-800 border border-red-500/40 rounded p-4">
                                         <div className="text-red-300 text-sm font-bold mb-1">{SM_NOT_FOUND}</div>
-                                        <div className="text-mn-tm text-[12px]">נסה לנסח מחדש, או עבור לתפריט לחיפוש לפי קטגוריה.</div>
+                                        <div className="text-mn-tm text-[12px] mb-3">נסה לנסח מחדש, או עבור לתפריט לחיפוש לפי קטגוריה.</div>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={() => { setSearchResult(null); setInput(searchResult.query); setTimeout(() => inputRef.current && inputRef.current.focus(), 0); }}
+                                                className="text-[12px] bg-mn-800 hover:bg-mn-700 border border-mn-600 hover:border-mn-gold text-mn-t hover:text-mn-gold px-3 py-1.5 rounded transition-colors">
+                                                ערוך שאלה
+                                            </button>
+                                            <button
+                                                onClick={goHome}
+                                                className="text-[12px] bg-mn-gold hover:bg-mn-goldh text-mn-950 font-bold px-3 py-1.5 rounded transition-colors">
+                                                פתח תפריט ←
+                                            </button>
+                                        </div>
                                     </div>
                                 )
                             )}
@@ -1652,13 +1687,6 @@
                                 )
                             )}
 
-                            {thinking && (
-                                <div className="flex justify-end">
-                                    <div className="bg-mn-800 border border-mn-700 rounded px-4 py-3 sm-typing">
-                                        <span></span><span></span><span></span>
-                                    </div>
-                                </div>
-                            )}
                         </div>
 
                         {(!atRoot || viewingResult) && (
@@ -1686,7 +1714,7 @@
                                 />
                                 <button
                                     onClick={ask}
-                                    disabled={!input.trim() || thinking}
+                                    disabled={!input.trim()}
                                     className="bg-mn-gold hover:bg-mn-goldh disabled:opacity-40 disabled:cursor-not-allowed text-mn-950 font-black px-4 py-2.5 rounded text-sm transition-colors uppercase"
                                 >
                                     חפש
