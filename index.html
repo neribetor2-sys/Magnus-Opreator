@@ -1911,14 +1911,24 @@
             };
 
             const handleAddTask = (incId, text, scheduledDate, scheduledTime) => {
+                let updatedText = text;
+                if (scheduledTime && !updatedText.includes(scheduledTime)) {
+                    let timeStr = scheduledTime;
+                    if (scheduledDate) {
+                        const parts = scheduledDate.split('-');
+                        if (parts.length === 3) timeStr += ` ${parts[2]}/${parts[1]}`;
+                    }
+                    updatedText += ` [מתוזמן ל-${timeStr}]`;
+                }
+
                 setState(prev => ({
                     ...prev,
                     incidents: prev.incidents.map(inc => {
                         if (inc.id !== incId) return inc;
                         const newTask = {
                             id: rid(),
-                            rawLine: `• ${text}`,
-                            text: text,
+                            rawLine: `• ${updatedText}`,
+                            text: updatedText,
                             done: false,
                             scheduledDate: scheduledDate || null,
                             scheduledTime: scheduledTime || null,
@@ -2028,6 +2038,16 @@
             };
 
             const addManualScheduledTask = ({ time, text, date, incidentId }) => {
+                let updatedText = text;
+                if (time && !updatedText.includes(time)) {
+                    let timeStr = time;
+                    if (date) {
+                        const parts = date.split('-');
+                        if (parts.length === 3) timeStr += ` ${parts[2]}/${parts[1]}`;
+                    }
+                    updatedText += ` [מתוזמן ל-${timeStr}]`;
+                }
+
                 if (incidentId) {
                     setState(prev => ({
                         ...prev,
@@ -2035,8 +2055,8 @@
                             if (inc.id !== incidentId) return inc;
                             const newTask = {
                                 id: rid(),
-                                rawLine: `• ${text}`,
-                                text,
+                                rawLine: `• ${updatedText}`,
+                                text: updatedText,
                                 done: false,
                                 scheduledDate: date || null,
                                 scheduledTime: time,
@@ -2051,7 +2071,7 @@
                 } else {
                     setState(prev => ({
                         ...prev,
-                        manualScheduledTasks: [...(prev.manualScheduledTasks || []), { id: rid(), time, text, date: date || null }],
+                        manualScheduledTasks: [...(prev.manualScheduledTasks || []), { id: rid(), time, text: updatedText, date: date || null }],
                     }));
                 }
             };

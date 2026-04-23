@@ -1091,16 +1091,24 @@
             };
 
             const handleAddTask = (incId, text, scheduledDate = null, scheduledTime = null) => {
+                let updatedText = text;
+                if (scheduledTime && !updatedText.includes(scheduledTime)) {
+                    let timeStr = scheduledTime;
+                    if (scheduledDate) {
+                        const parts = scheduledDate.split('-');
+                        if (parts.length === 3) timeStr += ` ${parts[2]}/${parts[1]}`;
+                    }
+                    updatedText += ` [מתוזמן ל-${timeStr}]`;
+                }
                 const isScheduled = !!(scheduledDate && scheduledTime);
-                const rawSuffix = isScheduled ? ` [${fmtDate(scheduledDate)} ${scheduledTime}]` : '';
                 setState(prev => ({
                     ...prev,
                     incidents: prev.incidents.map(inc => {
                         if (inc.id !== incId) return inc;
                         const newTask = {
                             id: rid(),
-                            rawLine: `• ${text}${rawSuffix}`,
-                            text,
+                            rawLine: `• ${updatedText}`,
+                            text: updatedText,
                             done: false,
                             ...(isScheduled ? { scheduledDate, scheduledTime } : {}),
                         };
@@ -1219,9 +1227,19 @@
             };
 
             const addManualScheduledTask = ({ date, time, text }) => {
+                let updatedText = text;
+                if (time && !updatedText.includes(time)) {
+                    let timeStr = time;
+                    if (date) {
+                        const parts = date.split('-');
+                        if (parts.length === 3) timeStr += ` ${parts[2]}/${parts[1]}`;
+                    }
+                    updatedText += ` [מתוזמן ל-${timeStr}]`;
+                }
+
                 setState(prev => ({
                     ...prev,
-                    manualScheduledTasks: [...(prev.manualScheduledTasks || []), { id: rid(), date: date || getDateStr(), time, text }],
+                    manualScheduledTasks: [...(prev.manualScheduledTasks || []), { id: rid(), date: date || getDateStr(), time, text: updatedText }],
                 }));
             };
 
