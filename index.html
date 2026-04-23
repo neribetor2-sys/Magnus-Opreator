@@ -44,8 +44,13 @@
         .incident-card.closed-event { opacity: 0.5; filter: grayscale(50%); }
         .incident-card.closed-event:hover { opacity: 0.65; filter: grayscale(30%); }
         .line-new { background: rgba(232,130,12,0.1); border-right: 2px solid #E8820C; }
-        .task-fade { animation: fadeOut 0.4s forwards; }
-        @keyframes fadeOut { to { opacity: 0; transform: translateX(10px); } }
+        .task-fade { animation: taskDone 0.5s forwards; }
+        @keyframes taskDone {
+            0% { opacity: 1; transform: none; }
+            40% { opacity: 0.7; text-decoration: line-through; text-decoration-color: #10b981; }
+            100% { opacity: 0; transform: translateX(10px); }
+        }
+        .task-fade label, .task-fade span { text-decoration: line-through; text-decoration-color: #10b981; }
         @keyframes pulse-red { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
         .blink-red { animation: pulse-red 2s infinite; }
         @keyframes alert-glow { 0%, 100% { box-shadow: 0 0 20px rgba(232,130,12,0.5); } 50% { box-shadow: 0 0 70px rgba(232,130,12,1); } }
@@ -94,6 +99,7 @@
         // Detects valid 24-hour times (00:00–23:59) in task text
         const TIME_RE = /\b((?:[01]?\d|2[0-3]):[0-5]\d)\b/;
         const normalizeTime = t => { const [h, m] = t.split(':'); return `${h.padStart(2,'0')}:${m}`; };
+        const stripTimeFromText = (text) => text.replace(TIME_RE, '').replace(/\s{2,}/g, ' ').trim();
 
         const getTodayStr = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; };
         const getTomorrowStr = () => { const n = new Date(); n.setDate(n.getDate()+1); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; };
@@ -351,7 +357,7 @@
                                 className="w-full bg-mn-950 border border-mn-700 rounded px-3 py-2 text-sm outline-none focus:border-mn-gold text-mn-t placeholder:text-mn-td"/>
                         </div>
                         <div className="flex gap-2 mt-5">
-                            <button onClick={submit} className="flex-1 bg-mn-gold hover:bg-mn-goldh text-mn-950 py-2.5 rounded font-black uppercase tracking-wider">הוסף</button>
+                            <button onClick={submit} disabled={!name.trim() || !type.trim()} className="flex-1 bg-mn-gold hover:bg-mn-goldh disabled:opacity-40 disabled:cursor-not-allowed text-mn-950 py-2.5 rounded font-black uppercase tracking-wider transition-opacity">הוסף</button>
                             <button onClick={onClose} className="px-4 bg-mn-700 hover:bg-mn-600 text-mn-t py-2.5 rounded">ביטול</button>
                         </div>
                     </div>
@@ -382,8 +388,9 @@
             );
         };
 
-        const GeneralTasksPanel = ({ tasks, onToggleTask }) => {
+        const GeneralTasksPanel = ({ tasks, onToggleTask, onAddTask }) => {
             const [inputVal, setInputVal] = useState('');
+            const [newTaskVal, setNewTaskVal] = useState('');
             const [flash, setFlash] = useState(null);
             const [fadingIds, setFadingIds] = useState([]);
 
@@ -396,10 +403,19 @@
                 setInputVal('');
                 if (matched) {
                     setFadingIds(prev => [...prev, matched.id]);
-                    setFlash(matched.text);
+                    setFlash({ type: 'done', text: matched.text });
                     setTimeout(() => onToggleTask(matched.id), 300);
                     setTimeout(() => setFlash(null), 2000);
                 }
+            };
+
+            const handleAddTask = () => {
+                const text = newTaskVal.trim();
+                if (!text) return;
+                onAddTask(text);
+                setNewTaskVal('');
+                setFlash({ type: 'added', text });
+                setTimeout(() => setFlash(null), 2000);
             };
 
             return (
@@ -407,6 +423,24 @@
                     <p className="text-[11px] font-bold text-amber-500 uppercase tracking-widest mb-3">
                         משימות כלליות ({openTasks.length})
                     </p>
+                    <div className="mb-3">
+                        <div className="flex gap-1.5">
+                            <input
+                                type="text"
+                                value={newTaskVal}
+                                onChange={e => setNewTaskVal(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddTask(); }}
+                                placeholder="הוסף משימה כללית..."
+                                className="flex-1 bg-mn-950 border border-mn-700 rounded px-3 py-2 text-xs focus:border-amber-500 outline-none text-mn-t placeholder:text-mn-td"
+                            />
+                            <button
+                                onClick={handleAddTask}
+                                disabled={!newTaskVal.trim()}
+                                className="shrink-0 bg-amber-700 hover:bg-amber-600 disabled:opacity-30 disabled:cursor-not-allowed px-2.5 py-2 rounded text-xs font-bold transition-colors text-white">
+                                +
+                            </button>
+                        </div>
+                    </div>
                     {openTasks.length === 0 ? (
                         <p className="text-xs text-mn-td italic">אין משימות כלליות</p>
                     ) : (
@@ -433,13 +467,15 @@
                                     placeholder='סמן משימה כבוצעה...'
                                     className="w-full bg-mn-950 border border-mn-700 rounded px-3 py-2 text-xs focus:border-amber-500 outline-none text-mn-t placeholder:text-mn-td"
                                 />
-                                {flash && (
-                                    <div className="mt-2 text-[11px] px-2 py-1 rounded bg-amber-900/50 text-amber-300">
-                                        ✓ משימה סומנה כבוצעה: {flash}
-                                    </div>
-                                )}
                             </div>
                         </>
+                    )}
+                    {flash && (
+                        <div className={`mt-2 text-[11px] px-2 py-1 rounded ${
+                            flash.type === 'added' ? 'bg-emerald-900/50 text-emerald-300' : 'bg-amber-900/50 text-amber-300'
+                        }`}>
+                            {flash.type === 'added' ? `+ משימה נוספה: ${flash.text}` : `✓ משימה סומנה כבוצעה: ${flash.text}`}
+                        </div>
                     )}
                 </div>
             );
@@ -793,7 +829,7 @@
                                                     title="הסר">×</button>
                                             )}
                                         </div>
-                                        <p className="text-xs text-mn-t leading-snug">{task.text}</p>
+                                        <p className="text-xs text-mn-t leading-snug">{stripTimeFromText(task.text)}</p>
                                         <p className="text-[10px] mt-1 truncate">
                                             <span className={`${task.source === 'manual' ? 'text-orange-500/70' : 'text-mn-td'}`}>
                                                 {task.source === 'manual' ? '✎ ידני' : task.incidentName}
@@ -1977,6 +2013,20 @@
                 }));
             };
 
+            const addGeneralTask = (text) => {
+                const newTask = {
+                    id: rid(),
+                    rawLine: `• ${text}`,
+                    text,
+                    done: false,
+                };
+                setState(prev => ({
+                    ...prev,
+                    generalTasks: [...(prev.generalTasks || []), newTask],
+                    generalTasksHeaderLine: prev.generalTasksHeaderLine || 'משימות כללי:',
+                }));
+            };
+
             const addManualScheduledTask = ({ time, text, date, incidentId }) => {
                 if (incidentId) {
                     setState(prev => ({
@@ -2189,6 +2239,7 @@
                                                 <GeneralTasksPanel
                                                     tasks={state.generalTasks}
                                                     onToggleTask={toggleGeneralTask}
+                                                    onAddTask={addGeneralTask}
                                                 />
                                             </div>
                                         </div>
