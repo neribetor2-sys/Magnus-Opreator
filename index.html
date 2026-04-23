@@ -861,7 +861,7 @@
         // ─── Action-verb lexicons ──────────────────────────────────────────────────
         // Used by the intent classifier AND by section profiling at parse time.
         // "Operational" sections are identified by having many of these tokens.
-        const SM_ACTION_VERBS_HE = new Set([
+        const SM_ACTION_VERBS_HE_RAW = [
             'תשאול','תשאל','הרם','וודא','ודא','בדוק','שלח','צלצל','עדכן','פתח',
             'סגור','הפעל','פנה','יצור','קשר','תאם','הזמן','הכן','הכנס','העבר',
             'הוצא','ערוך','שמור','תעד','דווח','בצע','חייג','ענה','המשך','כתוב',
@@ -869,7 +869,7 @@
             'לתאם','לעדכן','לפתוח','לסגור','להפעיל','להכין','להכניס','להעביר',
             'לתעד','לדווח','לבצע','לחייג','לענות','להמשיך','לכתוב','לקרוא',
             'לבקש','לאשר','לוודא','לסווג','לתחקר','לתאם'
-        ]);
+        ];
         const SM_ACTION_VERBS_EN = new Set([
             'verify','confirm','call','send','check','open','close','activate',
             'contact','coordinate','prepare','update','document','report','proceed',
@@ -940,6 +940,9 @@
             return t;
         };
 
+        // Normalize action verbs so they match smNormalizeToken output from user queries
+        const SM_ACTION_VERBS_HE = new Set(SM_ACTION_VERBS_HE_RAW.map(v => smNormalizeToken(v)));
+
         const smTokenize = (text) => {
             if (!text) return [];
             // Strip niqqud/cantillation (U+0591–U+05C7), then strip
@@ -1002,8 +1005,23 @@
                         bullets.push(b);
                     } else if (/^\*\*.+\*\*$/.test(line)) {
                         lines.push(line.replace(/\*\*/g, '').trim());
-                    } else if (line.startsWith('> ') || line === '---') {
+                    } else if (line === '---') {
                         continue;
+                    } else if (/^\|[-\s|:]+\|$/.test(line)) {
+                        // Skip markdown table separator rows (|---|---|)
+                        continue;
+                    } else if (line.startsWith('|') && line.endsWith('|')) {
+                        // Table data row — extract cell contents
+                        const cells = line.split('|').slice(1, -1).map(c => c.trim()).filter(Boolean);
+                        if (cells.length) lines.push(cells.join(' | '));
+                    } else if (line.startsWith('> ')) {
+                        // Blockquote — capture content without the '>' prefix
+                        const bq = line.slice(2).trim();
+                        if (bq) lines.push(bq);
+                    } else if (/^!\[([^\]]*)\]\(/.test(line)) {
+                        // Image — extract alt text
+                        const alt = line.match(/^!\[([^\]]*)\]/)[1].trim();
+                        if (alt) lines.push(alt);
                     } else {
                         lines.push(line);
                     }
@@ -1260,35 +1278,29 @@
             if (wantsSteps && bullets.length >= 2) {
                 const relevant = smPickRelevantLines(bullets, qTokens, 8);
                 if (relevant.length >= 2) {
-                    const steps = relevant.map((l, i) => `שלב ${i + 1}: ${l}`).join('\n');
-                    return `${header}\n\n${steps}`;
+                    return { header, steps: relevant };
                 }
                 if (relevant.length === 1) {
-                    return `${header}\n\n${relevant[0]}`;
+                    return { header, text: relevant[0] };
                 }
             }
 
             const lines = Array.isArray(top.lines) ? top.lines : [];
             const relevant = smPickRelevantLines(lines, qTokens, wantsSteps ? 6 : 3);
             if (!relevant.length) {
-                // No individual line contains the query tokens, but the
-                // section title did — the whole section IS the answer.
-                // Return its contents as-is instead of surfacing "not found".
                 const titleHit = qTokens.some(q => top.titleTokens.has(q));
                 if (!titleHit) return null;
                 if (wantsSteps && bullets.length >= 2) {
-                    const steps = bullets.slice(0, 8).map((l, i) => `שלב ${i + 1}: ${l}`).join('\n');
-                    return `${header}\n\n${steps}`;
+                    return { header, steps: bullets.slice(0, 8) };
                 }
-                const body = (bullets.length ? bullets.slice(0, 6) : lines.slice(0, 6)).join('\n');
-                return body ? `${header}\n\n${body}` : null;
+                const fallback = bullets.length ? bullets.slice(0, 6) : lines.slice(0, 6);
+                return fallback.length ? { header, steps: fallback } : null;
             }
 
             if (relevant.length >= 2 && wantsSteps) {
-                const steps = relevant.map((l, i) => `שלב ${i + 1}: ${l}`).join('\n');
-                return `${header}\n\n${steps}`;
+                return { header, steps: relevant };
             }
-            return `${header}\n\n${relevant.join(' ').replace(/\s+/g, ' ').trim()}`;
+            return { header, text: relevant.join(' ').replace(/\s+/g, ' ').trim() };
         };
 
         // Strict retrieval gate. A question is answered only when:
@@ -1565,10 +1577,10 @@
                                         <span className="text-mn-t truncate max-w-[220px]" title={searchResult.query}>חיפוש: "{searchResult.query}"</span>
                                     </>
                                 ) : navStack.slice(1).map((n, i, arr) => (
-                                    <span key={n.id} className="flex items-center gap-2">
-                                        <span className="text-mn-td">‹</span>
+                                    <React.Fragment key={n.id}>
+                                        <span className="text-mn-td select-none" aria-hidden="true">‹</span>
                                         <span className={i === arr.length - 1 ? 'text-mn-t font-bold' : ''}>{n.label}</span>
-                                    </span>
+                                    </React.Fragment>
                                 ))}
                             </div>
                         )}
@@ -1599,7 +1611,20 @@
                                                     : <span className="text-[9px] font-bold tracking-widest uppercase px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30">ℹ מידע</span>
                                             )}
                                         </div>
-                                        <div className="p-4 text-sm text-mn-t whitespace-pre-wrap leading-relaxed">{searchResult.res.answer}</div>
+                                        <div className="p-4 text-sm text-mn-t leading-relaxed">
+                                            {searchResult.res.answer.header && (
+                                                <div className="font-bold mb-2 whitespace-pre-wrap">{searchResult.res.answer.header}</div>
+                                            )}
+                                            {searchResult.res.answer.steps ? (
+                                                <ul className="space-y-1.5 list-disc pr-5 marker:text-mn-gold">
+                                                    {searchResult.res.answer.steps.map((step, i) => (
+                                                        <li key={i} className="text-mn-t">{step}</li>
+                                                    ))}
+                                                </ul>
+                                            ) : searchResult.res.answer.text ? (
+                                                <div className="whitespace-pre-wrap">{searchResult.res.answer.text}</div>
+                                            ) : null}
+                                        </div>
                                         {searchResult.res.sources && searchResult.res.sources.length > 0 && (
                                             <div className="px-4 pb-3 text-[10px] text-mn-td flex items-center justify-between gap-2 flex-wrap">
                                                 <span>
@@ -1678,7 +1703,7 @@
                                                     ) : sec.lines && sec.lines.length > 0 ? (
                                                         <div className="whitespace-pre-wrap">{sec.lines.join('\n')}</div>
                                                     ) : (
-                                                        <div className="text-mn-td italic">אין תוכן טקסטואלי בשקף זה.</div>
+                                                        <div className="text-mn-td italic">שקף זה מכיל תמונה, תרשים או טבלה, ואינו מכיל טקסט קריא.</div>
                                                     )}
                                                 </div>
                                             </details>
